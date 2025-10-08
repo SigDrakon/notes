@@ -1,6 +1,879 @@
+# 1. 什么是VPP
+
+FD.io 的矢量数据包处理器（Vector Packet Processor，简称 VPP）是一款高速、可扩展的 2-4 层多平台网络协议栈。它可在 Linux 用户空间运行，支持 x86、ARM 和 Power 等多种架构。
+
+VPP 的高性能网络协议栈正迅速成为全球各类应用的首选网络协议栈。
+
+通过广泛使用插件，VPP 的功能不断得到增强。数据平面开发工具包（Data Plane Development Kit，简称 DPDK）就是典型示例，它为 VPP 提供了一些重要功能和驱动程序。
+
+VPP 支持与 OpenStack 和 Kubernetes 集成。其网络管理功能包括配置、计数器、采样等。对于开发人员，VPP 提供了高性能事件日志记录和多种数据包跟踪功能；开发调试镜像则包含完整的符号表以及全面的一致性检查功能。
+
+VPP 的部分用例包括虚拟交换机（vSwitch）、虚拟路由器（vRouter）、网关、防火墙和负载均衡器等，仅举几例。
 
 
-# 1. VPP软件架构
+
+## 1.1. 标量 vs 矢量数据包处理
+
+FD.io VPP 采用矢量数据包处理技术开发，而非标量数据包处理。
+
+矢量数据包处理是高性能数据包处理应用（如 FD.io VPP 和 DPDK）中常用的方法。而基于标量的处理方式则更受那些对性能没有严格要求的网络协议栈青睐。
+
+
+
+### 1.1.1. 标量数据包处理
+
+标量数据包处理的网络协议栈通常一次处理一个数据包：中断处理函数从网络接口取出单个数据包，然后通过一系列函数对其进行处理 ——fooA 调用 fooB，fooB 再调用 fooC，依此类推。
+
+```shell
++---> fooA(packet1) +---> fooB(packet1) +---> fooC(packet1)
++---> fooA(packet2) +---> fooB(packet2) +---> fooC(packet2)
+...
++---> fooA(packet3) +---> fooB(packet3) +---> fooC(packet3)
+```
+
+标量数据包处理虽然简单，但在以下方面存在低效问题：
+
+当代码路径长度超过微处理器指令缓存（I-cache）的大小时，会发生抖动 —— 因为微处理器需要不断加载新指令。在这种模式下，每个数据包都会产生相同的指令缓存未命中问题。
+
+> 一个复杂程序的代码路径可能包含大量指令（如大型循环、多分支逻辑或频繁调用的复杂函数），当程序所需存储的指令总量超过 I-cache 的容量时，I-cache 无法一次性容纳所有必要的指令。此时，CPU 在执行过程中会频繁遇到 缓存未命中 的情况，导致 I-cache 不断置换指令，形成抖动，程序实际执行速度可能比预期慢数倍。
+
+相关的深层调用栈还会增加加载 - 存储单元的压力，因为栈局部变量会从微处理器的一级数据缓存（D-cache）中溢出。
+
+
+
+### 1.1.2. 矢量数据包处理
+
+相比之下，矢量数据包处理的网络协议栈一次处理多个数据包，这些数据包被称为 “数据包向量”（vectors of packets）或简称为 “向量”（vector）。
+
+中断处理函数从网络接口获取数据包向量，然后通过一系列函数对该向量进行处理 ——fooA 调用 fooB，fooB 再调用 fooC，依此类推。
+
+```shell
++---> fooA([packet1, +---> fooB([packet1, +---> fooC([packet1, +--->
+            packet2,             packet2,             packet2,
+            ...                  ...                  ...
+            packet256])          packet256])          packet256])
+```
+
+这种方法解决了以下问题：
+
+通过在多个数据包间分摊指令缓存加载的成本，解决了上述指令缓存抖动问题。
+
+通过从网络接口一次接收最多 256 个数据包的向量，并使用节点有向图对其进行处理，解决了深层调用栈带来的低效问题。图调度器每次调用一个节点调度函数，将栈深度限制在几个栈帧以内。
+
+这种方法还能实现进一步优化，例如通过流水线和预取技术，最小化表数据的读取延迟，并并行化处理数据包所需的数据包加载操作。
+
+
+
+## 1.2. 数据报处理图
+
+FD.io VPP 设计的核心是数据包处理图，这一设计使该软件具备以下特性：
+
+- 可插件化、易于理解且便于扩展
+- 成熟的图节点架构
+- 可完全控制流水线的重组
+- 性能高效，插件享有同等地位
+
+FD.io VPP 的数据包处理流水线被分解为一个 “数据包处理图”。这种模块化方法意味着，任何人都可以 “插入” 新的图节点 —— 这不仅让 VPP 的扩展性大幅提升，还能针对特定用途定制插件。此外，VPP 还可通过其底层 API 进行配置。
+
+![image-20251004194200851](./assets/image-20251004194200851.png)
+
+在运行时，FD.io VPP 平台会从 RX rings 组装数据包向量，单个向量中通常最多包含 256 个数据包。随后，数据包处理图会逐节点（包括插件）应用于整个数据包向量：当每个图节点所代表的网络处理操作依次作用于向量中的每个数据包时，接收的数据包会在向量中遍历数据包处理图的各个节点。
+
+图节点本身具有 “体积小巧、模块化、低耦合” 的特点，这使得引入新图节点、重新连接现有图节点的操作变得十分简便。
+
+插件本质是共享库（动态库），由 VPP 在运行时加载。VPP 的插件加载逻辑如下：通过搜索插件路径查找库文件，然后在启动时依次动态加载每个插件。一个插件可实现两种核心功能：一是引入新的图节点，二是重新编排数据包处理图的结构。
+
+更灵活的是，可以完全独立于 FD.io VPP 源代码构建插件——这意味着插件可被视为一个完全独立的组件，无需依赖 VPP 核心代码即可开发和维护。
+
+
+
+## 1.3. 网络栈特性
+
+- L2 - 4 层网络栈
+  - 用于路由、网桥条目的快速查找表
+  - 任意 n 元组分类器
+  - 控制平面、流量管理和叠加网络
+- Linux 和 FreeBSD 系统支持
+  - 支持标准操作系统接口，如 AF_Packet、Tun/Tap 和 Netmap
+- 借助 DPDK 支持网络和加密硬件
+- 支持容器和虚拟化技术
+  - 半虚拟化接口：Vhost 和 Virtio
+  - 通过 PCI 透传的网络适配器
+  - 原生容器接口：MemIF
+- 主机栈
+- 通用数据平面：一个代码，适用于多种用例
+  - 独立设备（如路由器和交换机）
+  - 云基础设施和虚拟网络功能
+  - 云原生基础设施
+  - 所有用例使用相同的二进制包
+- 得益于 CSIT（持续系统集成测试），开箱即具备生产级质量
+
+
+
+## 1.4. 主机栈
+
+VPP 的主机栈利用 VPP 基于图的转发模型和矢量化数据包处理技术，确保高吞吐量并扩展传输协议终结能力。它提供的 API 不仅支持用户空间应用高效地消费和生成数据，还能实现高效的本地应用间通信。
+
+从高层来看，VPP 的主机栈包含三个主要组件：
+
+- 会话层：用于促进传输协议与应用程序之间的交互
+- 可插拔的传输协议：包括 TCP、QUIC、TLS、UDP
+- VCL（VPP 通信库）：一套旨在从应用程序角度简化该栈使用的库
+
+
+
+所有这些组件都是定制构建的，以适应 VPP 的架构并充分利用其速度优势。为此，开发团队投入了大量精力：
+
+- 构建了支持传输协议可插拔的会话层，该层通过定制的共享内存基础设施，抽象了应用程序与传输协议之间的交互。值得注意的是，这也使得通常在应用程序中实现的传输协议（如 QUIC 和 TLS）能够在 VPP 内部实现。
+- 开发了全新的 TCP 实现，支持矢量化数据包处理，并遵循 VPP 的高可扩展线程模型。该实现符合 RFC 标准，支持大量高速 TCP 协议特性，并已通过 Defensic 的 Codenomicon 超过 100 万项测试用例的验证。
+- 开发了 VCL 库，它在用户空间模拟传统的异步通信函数，同时允许在需要时开发新的通信模式。
+- 实现了高性能的 “直通” 通信模式，使连接到 VPP 的应用程序能够通过共享内存透明地交换数据，而不会产生传统传输协议的额外开销。测试表明，这比传统的容器间网络高效得多。
+
+
+
+## 1.5. 额外特性
+
+- 丰富的运行时计数器：可统计吞吐量、每周期指令数、错误数、事件数等指标
+- 集成式流水线跟踪工具
+- 多语言 API 绑定
+- 用于调试的集成式命令行
+- 容错性与可升级性
+  - 它作为标准的用户空间进程运行以实现容错性，软件崩溃通常只需重启进程即可解决。
+  - 与在内核中运行类似数据包处理任务相比，其容错性和可升级性更优：软件更新完全无需重启系统。
+  - 开发体验更优：相较于编写类似的内核代码，VPP 的开发难度更低
+  - 硬件隔离与保护（输入输出内存管理单元，iommu）
+- 为安全性设计
+  - 全面的白盒测试
+  - 镜像段基地址随机化
+  - 共享内存段基地址随机化
+  - 栈边界检查
+  - 基于 Coverity 工具的静态分析
+
+
+
+## 1.6. 支持的架构和操作系统
+
+以下是 VPP 支持的架构与操作系统：
+
+
+
+### 1.6.1. 架构
+
+FD.io VPP 平台支持以下架构：
+
+- x86/64 
+- ARM-AArch64
+
+
+
+### 1.6.2. 操作系统与软件包安装
+
+FD.io VPP 支持在以下最新的长期支持（LTS）版本上通过软件包进行安装：
+
+- Debian
+- Ubuntu
+
+
+
+## 1.7. 性能
+
+FD.io VPP 的优势之一是其在相对低功耗计算设备上的高性能。其性能优势体现在以下方面：
+
+- 专为通用硬件设计的高性能用户空间网络栈：
+  - 支持 L2、L3、L4 层功能及封装。
+
+- 经过优化的数据包接口，可支持多种使用场景：
+  - 集成 vhost-user 后端，实现虚拟机间（VM-to-VM）高速连接
+  - 集成 memif 容器后端，实现容器间（Container-to-Container）高速连接
+  - 集成基于 vhost 的接口，用于将数据包转发至 Linux 内核
+
+- 相同的优化代码路径可在主机、虚拟机（VM）和 Linux 容器内部运行。
+- 充分利用一流的开源驱动技术：DPDK（数据平面开发工具包）。
+- 经过大规模测试验证：支持线性核心扩展，已在数百万条流和 MAC 地址的场景下完成测试。
+
+
+
+这些特性的设计充分利用了常见的微处理器优化技术，例如：
+
+- 通过向量方式处理数据包，减少缓存和 TLS（线程本地存储）缺失
+- 借助 SSE、AVX 和 NEON 等向量指令提升 IPC（每周期指令数）
+- 消除模式切换、上下文切换和阻塞，确保始终执行有效工作
+- 采用缓存行对齐的缓冲区，提高缓存和内存效率
+
+
+
+### 1.7.1. CSIT
+
+连续系统集成与测试（CSIT）项目为 FD.io VPP 提供功能和性能测试，重点关注功能和性能回归问题。测试结果发布在 [《CSIT测试报告》](https://docs.fd.io/csit/master/report/) 中。
+
+
+
+### 1.7.2. 数据包吞吐量示例
+
+以下是几个 CSIT 测试报告的示例链接。测试标题格式如下：
+
+```shell
+<packet size>-<number of threads><number of cores>-<test>-<interface type>
+
+<数据包大小>-< 线程数 >< 核心数 >-< 测试类型 >-< 接口类型 >
+```
+
+例如，标题为 “64b-2t1c-l2switching-base-i40e” 的测试表示：使用 64 字节数据包，2 个线程，1 个核心，基于 i40e 接口进行 L2 交换测试。
+
+
+
+### 1.7.3. 吞吐量趋势图表
+
+以下是 CSIT 趋势仪表板中的部分数据包吞吐量趋势图表。请注意，趋势图表中的性能数据会随软件开发周期每晚更新：
+
+- [以太网交换趋势](https://docs.fd.io/csit/master/trending/trending/l2.html)
+
+- [IPv4 路由趋势](https://docs.fd.io/csit/master/trending/trending/ip4.html)
+- [IPv6 路由趋势](https://docs.fd.io/csit/master/trending/trending/ip6.html)
+
+
+
+
+
+# 2. VPP的使用
+
+如果想要使用 VPP，从现有软件包安装二进制文件会很方便。本指南介绍如何获取、安装和运行 VPP 软件包。
+
+FD.io VPP 软件包存储在 Packagecloud.io 包仓库中。这里既有用于最新 VPP 发布版软件包的仓库，也有与 VPP git 仓库中每个分支相关联的仓库。
+
+在 Jenkins（[https://jenkins.fd.io](https://jenkins.fd.io/)）上运行的 VPP 合并作业，会针对每个受积极支持的 git 分支，将从该分支的 VPP 代码构建的软件包上传到 packagecloud。
+
+
+
+## 2.1. VPP的下载和安装（Ubuntu/Debian）
+
+
+
+### 2.1.1. 更新操作系统
+
+开始前，最好先更新和升级操作系统；运行以下命令升级操作系统并安装 curl 包，以便从 packagecloud.io 下载设置脚本：
+
+```shell
+sudo apt-get update
+sudo apt-get dist-upgrade -y
+sudo apt-get install curl
+```
+
+
+
+### 2.1.2. 使用 Packagecloude 设置脚本配置 Apt
+
+FD.io Packagecloud 仓库提供了一个弹出菜单，可用于复制单行 bash 命令来获取 packagecloud 设置脚本。通常，操作步骤如下：
+
+- 首先访问 FD.io packagecloud 的 URL： https://packagecloud.io/fdio
+
+- 然后选择所需的仓库链接（例如 “release”），并在 “快速安装说明” 部分选择 “Debian” 软件包图标。当弹出对话框出现时，点击 “复制” 按钮将运行设置脚本的命令复制到服务器的终端中。
+
+
+
+
+
+## 2.2. VPP的运行
+
+安装 VPP 时，会创建一个新的用户组 ”vpp“。为避免以 root 身份运行 VPP 命令行界面（vppctl），请将所有需要与 VPP 交互的现有用户添加到这个新组中：
+
+```shell
+sudo usermod -a -G vpp user1
+```
+
+更新当前会话以使组变更生效：
+
+```shell
+newgrp vpp
+```
+
+
+
+安装 VPP 时，也会安装一个 systemd 服务文件。
+
+该文件 vpp.service（Ubuntu 系统路径：/lib/systemd/system/vpp.service；CentOS 系统路径：/usr/lib/systemd/system/vpp.service）控制 VPP 作为服务的运行方式，例如失败时是否重启、重启延迟时间，以及应加载哪个 UIO 驱动程序和 “startup.conf” 文件的位置。
+
+```shell
+cat /usr/lib/systemd/system/vpp.service
+
+[Unit]
+Description=Vector Packet Processing Process
+After=syslog.target network.target auditd.service
+
+[Service]
+ExecStartPre=-/bin/rm -f /dev/shm/db /dev/shm/global_vm /dev/shm/vpe-api
+ExecStartPre=-/sbin/modprobe uio_pci_generic
+ExecStart=/usr/bin/vpp -c /etc/vpp/startup.conf
+Type=simple
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+
+
+> 注意：部分旧版本的 “uio_pci_generic” 驱动无法正确绑定所有支持的网卡，因此需要安装从 DPDK 构建的 “igb_uio” 驱动。该服务文件控制启动时加载哪个驱动，而 “startup.conf” 文件控制实际使用哪个驱动。
+
+
+
+VPP 运行期间需要大页内存来管理大型内存页。安装 VPP 时，它会覆盖现有的大页设置。默认情况下，VPP 将系统的大页数量设置为 1024 个 2M 大页。这是系统级别的大页数量，而非仅 VPP 使用的数量。
+
+安装 VPP 时，会将以下配置文件复制到系统中。大页设置会在 VPP 安装时生效，并在系统重启时重新应用。若要设置大页参数，请执行以下命令查看配置：
+
+```shell
+cat /etc/sysctl.d/80-vpp.conf
+# Number of 2MB hugepages desired
+vm.nr_hugepages=1024
+
+# Must be greater than or equal to (2 * vm.nr_hugepages).
+vm.max_map_count=3096
+
+# All groups allowed to access hugepages
+vm.hugetlb_shm_group=0
+
+# Shared Memory Max must be greater or equal to the total size of hugepages.
+# For 2MB pages, TotalHugepageSize = vm.nr_hugepages * 2 * 1024 * 1024
+# If the existing kernel.shmmax setting  (cat /sys/proc/kernel/shmmax)
+# is greater than the calculated TotalHugepageSize then set this parameter
+# to current shmmax value.
+kernel.shmmax=2147483648
+```
+
+
+
+根据系统用途，可更新此配置文件以调整系统预留的大页数量。以下是一些可能的设置示例：
+
+- 对于运行轻量工作负载的小型虚拟机：
+
+```shell
+vm.nr_hugepages=512
+vm.max_map_count=2048
+kernel.shmmax=1073741824
+```
+
+- 对于运行多个虚拟机（每个都需要自己的大页集）的大型系统：
+
+```shell
+vm.nr_hugepages=32768
+vm.max_map_count=66560
+kernel.shmmax=68719476736
+```
+
+
+
+> 注意：如果在虚拟机（VM）中运行 VPP，该虚拟机必须有大页支持。安装 VPP 时，它会尝试覆盖现有的大页设置。如果虚拟机没有大页支持，安装可能失败（但失败可能未被注意到）。当虚拟机重启时，系统启动过程中会重新应用 “vm.nr_hugepages” 设置，此时会失败，导致虚拟机内核启动中止，使虚拟机锁死。为避免这种情况，请确保虚拟机有足够的大页支持。
+
+
+
+## 2.3. 渐进式 VPP 教程
+
+通过本涵盖 FD.io VPP 基础场景的分步指南，学习如何在单个 Ubuntu 虚拟机（使用 Vagrant 工具）上运行 FD.io VPP。教程中会用到实用的 FD.io VPP 命令，并将介绍 FD.io VPP 的基础操作，以及系统上 FD.io VPP 运行时的状态。
+
+> 注意：本指南并非旨在提供 “生产环境部署操作指南” 类的说明文档。
+
+
+
+### 2.3.1. 设置环境
+
+所有这些练习都设计为在 Ubuntu 22.04（Jammy）系统上执行。
+
+如果你有一台 Ubuntu 22.04 设备，并且拥有 sudo 或 root 权限，可以直接使用它。如果没有，下面的步骤会提供一个 Vagrantfile，帮你搭建一个基础的 Ubuntu 22.04 环境。
+
+
+
+#### 2.3.1.1. 安装 Libvirt 和 Vagrant
+
+安装 Libvirt 和 Vagrant
+
+
+
+#### 2.3.1.2. 创建 Vagrant 目录
+
+- 创建一个 Vagrant 目录
+
+```shell
+mkdir vpp-tutorial
+cd vpp-tutorial
+```
+
+
+
+- 创建一个名为 Vagrantfile 的文件，内容如下：
+
+```shell
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure(2) do |config|
+
+  config.vm.box = "generic/ubuntu2204"
+
+  vmcpu=(ENV['VPP_VAGRANT_VMCPU'] || 2)
+  vmram=(ENV['VPP_VAGRANT_VMRAM'] || 4096)
+
+  config.ssh.forward_agent = true
+
+  config.vm.provider "libvirt" do |vb|
+      vb.memory = "#{vmram}"
+      vb.cpus = "#{vmcpu}"
+  end
+end
+```
+
+
+
+#### 2.3.1.3. 运行 Vagrant
+
+VPP 运行在用户空间中。在生产环境中，你通常会结合 DPDK 运行它，以连接到真实网卡，或者结合 vhost 连接到虚拟机。这种情况下，通常只运行一个 VPP 实例。
+
+但就本教程而言，运行多个 VPP 实例并将它们相互连接形成拓扑会非常有帮助。幸运的是，VPP 支持这种操作。
+
+运行多个 VPP 实例时，每个实例都需要指定一个 “名称”（name）或 “前缀”（prefix）。在下面的示例中，“名称” 或 “前缀” 为 “vpp1”。注意，只有一个实例可以使用 DPDK 插件，因为该插件会尝试获取一个文件的锁。
+
+
+
+#### 2.3.1.4. 使用 Vagrant 设置 vpp 环境
+
+设置好 Vagrant 后，在 Vagrant 目录中使用以下命令启动虚拟机：
+
+```shell
+vagrant up
+vagrant ssh
+sudo bash
+apt-get update
+reboot -n
+# 等待虚拟机重启
+vagrant ssh
+```
+
+
+
+#### 2.3.1.5. 安装 vpp
+
+现在虚拟机已更新，我们将安装 VPP 软件包。有关安装 VPP 的更多信息，请参考  ["下载和安装VPP"](https://s3-docs.fd.io/vpp/25.10/gettingstarted/installing/index.html#installingvpp) 
+
+在本教程中，我们将通过修改 /etc/apt/sources.list.d/99fd.io.list 文件来安装 VPP。向该文件写入以下内容：
+
+```shell
+sudo bash
+echo "deb https://packagecloud.io/fdio/release/ubuntu jammy main" > /etc/apt/sources.list.d/99fd.io.list
+```
+
+
+
+获取密钥：
+
+```shell
+curl -L https://packagecloud.io/fdio/release/gpgkey | sudo apt-key add -
+```
+
+
+
+然后执行以下命令：
+
+```shell
+apt-get update
+apt-get install vpp vpp-plugin-core vpp-plugin-dpdk
+```
+
+
+
+为本教程停止 VPP 服务，我们将创建自己的 VPP 实例
+
+```shell
+service vpp stop
+```
+
+
+
+#### 2.3.1.6. 创建一些启动文件
+
+我们将为本教程创建一些启动文件。通常，你会修改 `/etc/vpp/startup.conf` 文件。有关该文件的更多信息，请参考 [配置参考](https://s3-docs.fd.io/vpp/25.10/configuration/reference.html#configuration-reference)
+
+运行多个 VPP 实例时，每个实例都需要指定一个 “名称” 或 “前缀”。在下面的示例中，“名称” 或 “前缀” 为 “vpp1”。注意，只有一个实例可以使用 DPDK 插件，因为该插件会尝试获取一个文件的锁。我们创建的这些启动文件会禁用 DPDK 插件。
+
+另外，在我们的启动文件中注意 api-segment 配置：`api-segment {prefix vpp1}` 用于告知 FD.io VPP 如何以不同于默认的方式命名 /dev/shm/ 目录中你的 VPP 实例的文件；`unix {cli-listen /run/vpp/cli-vpp1.sock}` 用于告知 vpp 在被 vppctl 访问时使用非默认的套接字文件。
+
+现在创建两个文件，分别命名为 startup1.conf 和 startup2.conf，内容如下。这些文件可以放在任何位置，启动 VPP 时我们会指定其位置。
+
+```shell
+startup1.conf
+
+unix {cli-listen /run/vpp/cli-vpp1.sock}
+api-segment { prefix vpp1 }
+plugins { plugin dpdk_plugin.so { disable } }
+```
+
+
+
+```shell
+startup2.conf
+
+unix {cli-listen /run/vpp/cli-vpp2.sock}
+api-segment { prefix vpp2 }
+plugins { plugin dpdk_plugin.so { disable } }
+```
+
+
+
+### 2.3.2. 运行 VPP
+
+使用我们在 “设置环境” 中创建的文件，现在来启动和运行 VPP。
+
+VPP 运行在用户空间中。在生产环境中，你通常会结合 DPDK 运行它（以连接到真实网卡），或者结合 vhost 运行（以连接到虚拟机）。这种情况下，通常只运行一个 VPP 实例。
+
+但就本教程而言，运行多个 VPP 实例并将它们相互连接形成拓扑结构会非常有帮助。幸运的是，VPP 支持这种操作。
+
+使用我们在设置阶段创建的文件来启动 VPP：
+
+```shell
+sudo /usr/bin/vpp -c startup1.conf
+
+vlib_plugin_early_init:361: plugin path /usr/lib/vpp_plugins:/usr/lib/vpp_plugins
+load_one_plugin:189: Loaded plugin: abf_plugin.so (ACL based Forwarding)
+load_one_plugin:189: Loaded plugin: acl_plugin.so (Access Control Lists)
+load_one_plugin:189: Loaded plugin: avf_plugin.so (Intel Adaptive Virtual Function (AVF) Device Plugin)
+.........
+```
+
+
+
+如果 VPP 无法启动，可以尝试在 startup.conf 文件的 unix 部分添加 nodaemon 参数。这会在输出中提供更多信息。带 nodaemon 的 startup.conf 示例：
+
+```shell
+unix {nodaemon cli-listen /run/vpp/cli-vpp1.sock}
+api-segment { prefix vpp1 }
+plugins { plugin dpdk_plugin.so { disable } }
+```
+
+
+
+vppctl 命令会启动一个 VPP 交互 shell，你可以在其中交互式地运行 VPP 命令。现在我们可以启动 VPP shell 并查看版本信息：
+
+```shell
+sudo vppctl -s /run/vpp/cli-vpp1.sock
+    _______    _        _   _____  ___
+ __/ __/ _ \  (_)__    | | / / _ \/ _ \
+ _/ _// // / / / _ \   | |/ / ___/ ___/
+ /_/ /____(_)_/\___/   |___/_/  /_/
+
+vpp# show version
+vpp v18.07-release built by root on c469eba2a593 at Mon Jul 30 23:27:03 UTC 2018
+```
+
+> 注意：按 ctrl-d 或 q 可退出 VPP shell
+
+
+
+如果以这种方式运行多个 VPP 实例，结束时请务必终止它们。你可以使用类似以下的命令：
+
+```shell
+ps -eaf | grep vpp
+root      2067     1  2 05:12 ?        00:00:00 /usr/bin/vpp -c startup1.conf
+vagrant   2070   903  0 05:12 pts/0    00:00:00 grep --color=auto vpp
+kill -9 2067
+ps -eaf | grep vpp
+vagrant   2074   903  0 05:13 pts/0    00:00:00 grep --color=auto vpp
+```
+
+
+
+### 2.3.3. 
+
+
+
+
+
+# 2. 使用案例
+
+
+
+
+
+## 2.5. vpp 与 VMware / Vmxnet3
+
+本节介绍 VPP 中包含的原生 Vmxnet3 驱动。该驱动以插件形式实现，位于 src/plugin/vmxnet3 目录下。
+
+
+
+### 2.5.1. 优势
+
+VPP 原生 vmxnet3 驱动提供了标准 DPDK vmxnet3 驱动所不具备的以下功能：
+
+- 中断模式（Interrupt mode）
+- 自适应模式（Adaptive mode）
+- LRO/TSO 模式（大接收卸载 / TCP 分段卸载）
+
+
+
+### 2.5.2. 不支持的功能
+
+该驱动目前尚不支持以下功能：
+
+- VLAN 过滤（VLAN filter）
+
+
+
+### 2.5.3. 前置条件
+
+
+
+
+
+## 2.6. vpp 作为家庭网关
+
+在小型系统（配备合适的网卡）上运行的 VPP 可以作为出色的家庭网关。其性能远超需求：调试镜像在向量大小约为 1.2 的情况下，即可处理 150Mbps 下行 / 10Mbps 上行的有线调制解调器连接。
+
+至少需要安装 sshd 和 isc-dhcp-server。如果偏好，也可以使用 dnsmasq。
+
+
+
+### 2.6.1. 系统配置文件
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 3. 开发者文档
+
+
+
+
+
+## 3.1. 构建、运行与调试
+
+若要开始 VPP 开发，需获取所需的 VPP 源码，然后构建软件包。有关构建系统的更多详细信息，请参考《构建系统》（Build System）文档。
+
+
+
+### 3.1.1. 获取 vpp 源码
+
+若要获取用于构建的 VPP 源码，请运行以下命令：
+
+```shell
+git clone https://gerrit.fd.io/r/vpp
+cd vpp
+```
+
+VPP 的版本信息源自 git 描述信息（基于 git 标签生成）。若使用 GitHub 生成的压缩包，版本信息会从版本文件（`.../src/scripts/.version`）中缺失 —— 而在非 git 工作目录中构建时，版本脚本需要该文件，否则构建会失败。这种情况下，需在`.../src/scripts/.version`文件中填入所需的版本字符串，以满足版本脚本的要求。
+
+或者，在已克隆的 git 工作目录中执行`make dist`命令，会生成一个 xz 压缩格式的源码压缩包，其中包含`.../src/scripts/.version`文件（该文件使用 VPP 镜像的标准命名规则，包含 git 哈希值）。
+
+使用`-J`选项通过 xz 工具解压该压缩包，例如：
+
+```shell
+tar xvJf ./build-root/vpp-23.10-rc0~184-g48cd559fb.tar.xz
+```
+
+
+
+### 3.1.2. 构建 vpp 依赖
+
+在构建 VPP 镜像前，请确保系统中未安装 FD.io VPP 或 DPDK 软件包，可执行以下命令检查：
+
+```shell
+dpkg -l | grep vpp
+dpkg -l | grep DPDK
+```
+
+执行上述命令后，应无输出（或无软件包显示）。
+
+
+
+请确保已安装`make`工具，若未安装，先运行以下命令：
+
+```shell
+sudo apt install make
+```
+
+
+
+执行以下 make 命令，安装 FD.io VPP 的依赖，若下载过程卡住，可能需要配置代理才能继续：
+
+```shell
+make install-dep
+
+Hit:1 http://us.archive.ubuntu.com/ubuntu xenial InRelease
+Get:2 http://us.archive.ubuntu.com/ubuntu xenial-updates InRelease [109 kB]
+Get:3 http://security.ubuntu.com/ubuntu xenial-security InRelease [107 kB]
+Get:4 http://us.archive.ubuntu.com/ubuntu xenial-backports InRelease [107 kB]
+Get:5 http://us.archive.ubuntu.com/ubuntu xenial-updates/main amd64 Packages [803 kB]
+Get:6 http://us.archive.ubuntu.com/ubuntu xenial-updates/main i386 Packages [732 kB]
+...
+...
+Update-alternatives: using /usr/lib/jvm/java-8-openjdk-amd64/bin/jmap to provide /usr/bin/jmap (jmap) in auto mode
+Setting up default-jdk-headless (2:1.8-56ubuntu2) ...
+Processing triggers for libc-bin (2.23-0ubuntu3) ...
+Processing triggers for systemd (229-4ubuntu6) ...
+Processing triggers for ureadahead (0.100.0-19) ...
+Processing triggers for ca-certificates (20160104ubuntu1) ...
+Updating certificates in /etc/ssl/certs...
+0 added, 0 removed; done.
+Running hooks in /etc/ca-certificates/update.d...
+
+done.
+done.
+```
+
+
+
+### 3.1.3. 构建 vpp （debug）
+
+此版本包含调试符号，对修改 VPP 代码非常有用。以下`make`命令用于构建 VPP 的调试版。构建调试镜像时，生成的二进制文件可在`/build-root/vpp_debug-native`目录中找到。
+
+调试版包含调试符号，便于问题排查或代码修改。执行以下`make`命令构建 VPP 调试版：
+
+```shell
+make build
+
+make[1]: Entering directory '/home/vagrant/vpp-master/build-root'
+@@@@ Arch for platform 'vpp' is native @@@@
+@@@@ Finding source for dpdk @@@@
+@@@@ Makefile fragment found in /home/vagrant/vpp-master/build-data/packages/dpdk.mk @@@@
+@@@@ Source found in /home/vagrant/vpp-master/dpdk @@@@
+@@@@ Arch for platform 'vpp' is native @@@@
+@@@@ Finding source for vpp @@@@
+@@@@ Makefile fragment found in /home/vagrant/vpp-master/build-data/packages/vpp.mk @@@@
+@@@@ Source found in /home/vagrant/vpp-master/src @@@@
+...
+...
+make[5]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp/vpp-api/java'
+make[4]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp/vpp-api/java'
+make[3]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp'
+make[2]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp'
+@@@@ Installing vpp: nothing to do @@@@
+make[1]: Leaving directory '/home/vagrant/vpp-master/build-root'
+```
+
+
+
+### 3.1.4. 构建 vpp （release）
+
+本节介绍如何构建 FD.io VPP 的常规发布版。发布版经过优化，不包含任何调试符号。构建发布镜像时，生成的二进制文件可在`/build-root/vpp-native`目录中找到。
+
+执行以下`make`命令构建 FD.io VPP 的发布版：
+
+```shell
+make build-release
+```
+
+
+
+### 3.1.5. 安装外部依赖
+
+此时，仍有部分 VPP 外部依赖未安装。这些依赖可通过`make-build`安装，但该命令仅会将其安装在 VPP 目录树本地，而非操作系统中。为解决此问题并节省时间，运行以下命令：
+
+```shell
+make install-ext-deps
+```
+
+
+
+需构建的软件包类型取决于 VPP 将要运行的系统：
+
+- 若 VPP 运行在 Ubuntu 上，需构建 Debian 软件包
+- 若 VPP 运行在 CentOS 或 Redhat 上，需构建 RPM 软件包
+
+
+
+**构建 Debian 软件包**
+
+若要构建 Debian 软件包，执行以下命令：
+
+```shell
+make pkg-deb
+```
+
+
+
+
+
+
+
+
+
+
+
+构建 RPM 软件包
+
+
+
+
+
+
+
+**安装软件包**
+
+软件包构建完成后，可在 build-root 目录中找到。执行以下命令查看：
+
+```shell
+ls build-root/*.deb
+
+vpp_18.07-rc0~456-gb361076_amd64.deb             vpp-dbg_18.07-rc0~456-gb361076_amd64.deb
+vpp-dev_18.07-rc0~456-gb361076_amd64.deb         vpp-api-lua_18.07-rc0~456-gb361076_amd64.deb
+vpp-lib_18.07-rc0~456-gb361076_amd64.deb         vpp-api-python_18.07-rc0~456-gb361076_amd64.deb
+vpp-plugins_18.07-rc0~456-gb361076_amd64.deb
+```
+
+
+
+使用以下命令安装生成的软件包：
+
+- Ubuntu 系统
+
+```shell
+sudo dpkg -i build-root/*.deb
+```
+
+
+
+- CentOS 系统或 Redhat 系统
+
+```shell
+sudo rpm -ivh build-root/*.rpm
+```
+
+
+
+
+
+构建 VPP 二进制文件后，会生成多个镜像。这些镜像在**不需要安装软件包的情况下运行 VPP 时**非常有用，例如当你想用 GDB 调试 VPP 时。
+
+
+
+### 3.2.1. 不使用 gbd 运行
+
+
+
+
+
+### 3.2.1. 使用 gdb 运行
+
+
+
+
+
+## 3.2. 核心架构
+
+
+
+
+
+### 3.2.1. Software Architecture 软件架构
 
 fd.io VPP 的实现是第三代向量数据包处理实现，为了性能，VPP 数据平面由一个 **转发节点** 的 **有向图** 组成，该图在每次调用时处理多个数据包。
 
@@ -17,4 +890,1432 @@ VPP分层的实现分类：
 - VPP Infra：VPP 基础设施层，其中包含核心库源代码。该层执行**内存功能**，处理**向量和环**，在**哈希表**中执行**密钥查找**，并使用**计时器**来调度图节点。
 - VLIB：**向量处理库**。VLIB 层还处理各种**应用管理功能**：**缓冲区、内存和图节点管理**，维护和导出**计数器**，**线程管理**，以及**数据包跟踪**。VLIB 实现了调试 **CLI（命令行接口）**。
 - VNET：处理 VPP 的**网络接口**（第 2、3 和 4 层），执行**会话和流量管理**，并处理**设备**和**数据控制平面**。
-- Plugins：包含一套日益丰富的**数据平面插件**，如上图（*原文提及，但未提供*）所示。
+- Plugins：包含一套日益丰富的**数据平面插件**，如上图所示。
+- VPP：链接上述所有组建的容器应用
+
+
+
+### 3.2.2. VPPINFRA 基础设施层
+
+VPP 基础设施层（VPPINFRA）相关文件位于`./src/vppinfra`目录下。
+
+VPPINFRA 是一组基础 C 库服务的集合，功能足以支持构建可直接在裸机上运行的独立程序。它还提供高性能动态数组（向量）、哈希表、位图、高精度实时时钟支持、细粒度事件日志记录以及数据结构序列化能力。
+
+关于 VPPINFRA，有一点需要说明（也可视为提醒）：仅通过名称，你往往无法区分某个标识符是宏、内联函数还是普通函数。宏的使用主要是为了避免典型场景下的函数调用开销，同时可能会产生（预期的）副作用。
+
+
+
+VPPINFRA 已有近 20 年历史，通常不会频繁变更。该基础设施层包含以下核心功能：
+
+#### 3.2.2.1. Vectors
+
+VPPINFRA 中的向量是无处不在的动态扩容数组，支持用户自定义 “头部”（header）。VPPINFRA 的许多数据结构（如哈希表、堆、内存池）都是带有不同头部的向量。
+
+其内存布局如下：
+
+```shell
+                  User header (optional, uword aligned)
+                  Alignment padding (if needed)
+                  Vector length in elements
+User's pointer -> Vector element 0
+                  Vector element 1
+                  ...
+                  Vector element N-1
+```
+
+如上所示，向量 API 操作的是指向向量第 0 个元素的指针。空指针（NULL）被视为长度为 0 的有效向量。
+
+为避免频繁触发内存分配器（导致性能损耗），通常会将向量长度重置为 0，同时保留已分配的内存。可通过`vec_reset_length(v)`宏将向量长度字段设为 0。【务必使用该宏！它能智能处理 NULL 指针场景。】
+
+通常情况下，用户头部并不存在。用户头部允许在 VPPINFRA 向量的基础上构建其他数据结构。用户可通过`vec_*_aligned`系列宏，指定向量第一个数据元素的对齐方式。
+
+向量元素可以是任意 C 语言类型（如`int`、`double`、`struct bar`）。基于向量构建的数据类型（如堆、内存池等）也同样支持任意类型。许多宏都有不同变体：`_a`变体支持向量元素对齐，`_h`变体支持非零长度的向量头部，`_ha`变体则同时支持对齐和头部。此外，可通过`CLIB_CACHE_LINE_ALIGN_MARK`宏，指定向量元素结构内部的缓存行对齐方式。
+
+需注意：若在使用时，头部和 / 或对齐相关的宏变体选择不一致，可能会导致延迟性的、难以排查的错误。
+
+常见编程错误：记住向量第 i 个元素的指针后，再对向量进行扩容。向量扩容时会按 1.5 倍（3/2）增长，因此这类代码可能在一段时间内看似正常工作。正确的做法是：几乎所有场景下都应记住向量索引 —— 索引在向量重分配过程中是不变的。
+
+在典型的应用镜像中，通常会提供一组可从 gdb 调用的全局函数，示例如下：
+
+- `vl(v)` - 打印`vec_len(v)`（向量长度）
+- `pe(p)` - 打印`pool_elts(p)`（内存池元素数）
+- `pifi(p, index)` - 打印`pool_is_free_index(p, index)`（判断内存池索引是否空闲）
+- `debug_hex_bytes (p, nbytes)` - 从地址`p`开始，以十六进制形式打印`nbytes`字节的内存数据
+
+可通过 “show gdb” 调试命令行（debug CLI）命令，查看当前可用的 gdb 辅助函数集合。
+
+
+
+#### 3.2.2.2. Bitmaps
+
+VPPINFRA 位图基于 VPPINFRA 向量 API 实现，支持动态扩容，适用于多种场景。
+
+
+
+#### 3.2.2.3. Pools
+
+VPPINFRA 内存池结合了向量和位图的特性，可快速分配和释放具有独立生命周期的固定大小数据结构。内存池非常适合用于分配每个会话（per-session）的结构体。
+
+
+
+#### 3.2.2.4. Hashes
+
+VPPINFRA 提供多种类型的哈希表。涉及数据包分类 / 会话查找的数据平面场景，通常会使用`./src/vppinfra/bihash_template.[ch]`中定义的**有界索引可扩展哈希表（bounded-index extensible hashes）** 。这些模板会被多次实例化，以高效支持不同固定键（fixed-key）长度的场景。
+
+有界索引哈希表（bihash）是线程安全的，无需读锁：仅通过一个简单的自旋锁（spin-lock），即可确保同一时间只有一个线程写入某个条目。
+
+`./src/vppinfra/hash.[ch]`中实现的原始 VPPINFRA 哈希表使用简单，常用于控制平面代码中需要精确字符串匹配（exact-string-matching）的场景。
+
+无论使用哪种哈希表，常见用法都是：在哈希表中查找某个键（key），以获取关联向量或内存池中的索引。哈希表 API 本身较为简单，但在使用 “非托管任意长度键”（unmanaged arbitrary-sized key）变体时需格外注意。`hash_set_mem (hash_table, key_pointer, value)`函数会直接记录`key_pointer`（键指针）—— 若将向量元素的地址作为该函数的第二个参数（key_pointer），通常会导致严重错误；而记录文本段（text segment）中常量字符串的地址则是完全安全的。
+
+
+
+#### 3.2.2.5. 时钟管理
+
+
+
+
+
+
+
+#### 3.2.2.7. format
+
+Vppinfra 的 format 大致相当于 printf。
+
+format 有几个值得一提的特性。format 的第一个参数是（u8*）向量，它会将当前格式化操作的结果追加到该向量中。链式调用非常简单：
+
+```shell
+u8 * result;
+
+result = format (0, "junk = %d, ", junk);
+result = format (result, "more junk = %d\n", more_junk);
+```
+
+
+
+如前所述，空指针（NULL）完全可以作为长度为 0 的向量。format 返回的是（u8*）向量，而非 C 字符串。若要打印（u8*）向量，请使用 “% v” 格式字符串。若需要一个同时也是有效 C 字符串的（u8*）向量，可使用以下两种方式之一：
+
+```shell
+vec_add1 (result, 0)
+or
+result = format (result, "<whatever>%c", 0);
+```
+
+
+
+记得在适当的时候用 vec_free () 释放 result。注意不要向 format 传递未初始化的（u8*）。
+
+format 通过 “% U” 格式说明符实现了一种特别实用的用户自定义格式化机制。例如：
+
+```shell
+u8 * format_junk (u8 * s, va_list *va)
+{
+  junk = va_arg (va, u32);
+  s = format (s, "%s", junk);
+  return s;
+}
+
+result = format (0, "junk = %U, format_junk, "This is some junk");
+```
+
+如果需要，format_junk () 可以调用其他用户自定义格式化函数。程序员需要负责参数类型检查：如果 va_arg (va, type) 宏与调用者预期的类型不匹配，用户格式化函数通常会发生严重错误。
+
+
+
+#### 3.2.2.8. unformat
+
+Vppinfra 的 unformat 与 scanf 有些相似，但功能更为通用。
+
+典型用法包括：从 C 字符串或（u8*）向量初始化 unformat_input_t 结构体，然后通过 unformat () 进行解析，如下所示：
+
+```shell
+unformat_input_t input;
+u8 *s = "<some-C-string>";
+
+unformat_init_string (&input, (char *) s, strlen((char *) s));
+/* or */
+unformat_init_vector (&input, <u8-vector>);
+```
+
+
+
+然后循环解析各个元素：
+
+```shell
+while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+{
+  if (unformat (&input, "value1 %d", &value1))
+    ;/* unformat sets value1 */
+  else if (unformat (&input, "value2 %d", &value2)
+    ;/* unformat sets value2 */
+  else
+    return clib_error_return (0, "unknown input '%U'",
+                              format_unformat_error, input);
+}
+```
+
+
+
+与 format 类似，unformat 通过 “%U” 用户自定义 unformat 函数机制，实现了用户自定义解析功能。通常，“format (s, "foo %d", foo)” 可以轻松转换为 “unformat (input, "foo %d", &foo)”。
+
+Unformat 提供了几个 scanf 不具备的实用格式说明符：
+
+```shell
+unformat (input, "enable %=", &enable, 1 /* defaults to 1 */);
+unformat (input, "bitzero %|", &mask, (1<<0));
+unformat (input, "bitone %|", &mask, (1<<1));
+<etc>
+```
+
+
+
+“enable %=” 的含义是：如果 unformat 仅解析到 “enable” 关键字，则将提供的变量设为默认值；如果解析到 “enable 123”，则将变量设为 123。
+
+使用 “%=” 可以简化许多手动编写的 “verbose” + “verbose % d” 这类参数解析代码。
+
+“bitzero %|” 的含义是：如果 unformat 解析到 “bitzero”，则在提供的位掩码中设置指定的位。尽管这看起来很实用，但在代码库中使用得很少。
+
+%_用于切换是否跳过输入中的空白字符。
+
+若要在格式字符串中间从 “跳过空白” 切换为 “不跳过空白”，需先跳过输入空白。例如：
+
+```shell
+fmt = "%_%d.%d%_->%_%d.%d%_"
+unformat (input, fmt, &one, &two, &three, &four);
+```
+
+这段代码可以匹配输入 “1.2 -> 3.4”。如果没有 %_，“->” 后的空格将不会被跳过。
+
+
+
+##### 3.2.2.8.1. 如何解析单行输入
+
+调试 CLI 命令函数绝对不能意外消耗属于其他调试 CLI 命令的输入。否则，当一组调试 CLI 命令在脚本中执行时，即使单独执行时 “工作正常”，也可能出现问题。
+
+以下代码是错误的：
+
+```shell
+/* Eats script input NOT beloging to it, and chokes! */
+while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  {
+    if (unformat (input, ...))
+  ;
+    else if (unformat (input, ...))
+  ;
+    else
+      return clib_error_return (0, "parse error: '%U'",
+                           format_unformat_error, input);
+  }
+  }
+```
+
+
+
+当作为脚本的一部分执行时，除非该函数恰好是脚本中的最后一个命令，否则每次都会返回 “解析错误: ''”。
+
+正确的做法是：使用 “unformat_line_input” 来消耗当前行的剩余输入 —— 即 VLIB_CLI_COMMAND 声明中指定路径之外的所有内容。
+
+例如，若 “my_command” 的配置如下，且用户输入为 “my path is clear”，则 unformat_line_input 会生成一个包含 “is clear” 的 unformat_input_t 结构体。
+
+```shell
+VLIB_CLI_COMMAND (...) = {
+    .path = "my path",
+};
+```
+
+
+
+以下代码完整展示了所需的机制：
+
+```shell
+ static clib_error_t *
+ my_command_fn (vlib_main_t * vm,
+                unformat_input_t * input,
+                vlib_cli_command_t * cmd)
+ {
+   unformat_input_t _line_input, *line_input = &_line_input;
+   u32 this, that;
+   clib_error_t *error = 0;
+
+   if (!unformat_user (input, unformat_line_input, line_input))
+     return 0;
+
+   /*
+    * Here, UNFORMAT_END_OF_INPUT is at the end of the line we consumed,
+    * not at the end of the script...
+    */
+   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+     {
+        if (unformat (line_input, "this %u", &this))
+          ;
+        else if (unformat (line_input, "that %u", &that))
+          ;
+        else
+          {
+            error = clib_error_return (0, "parse error: '%U'",
+                              format_unformat_error, line_input);
+            goto done;
+          }
+       }
+
+ <do something based on "this" and "that", etc>
+
+ done:
+   unformat_free (line_input);
+   return error;
+ }
+VLIB_CLI_COMMAND (my_command, static) = {
+  .path = "my path",
+  .function = my_command_fn",
+};
+```
+
+
+
+
+
+#### 3.2.2.9. vppinfra 的错误与警告
+
+VPP 数据平面中的许多函数返回`clib_error_t *`类型的值。`clib_error_t`是带有少量元数据（如 “致命”“警告”）的任意字符串，且易于输出。返回`NULL`的`clib_error_t *`表示 “一切正常，无错误”。
+
+`Clib_warning(format-args)`是添加调试输出的便捷方式；`clib`警告会在消息前添加 “函数名：行号” 信息，以明确消息的来源。`Clib_unix_warning()`会附加`perror()`风格的 Linux 系统调用信息。在生产环境镜像中，`clib`警告会生成系统日志（syslog）条目。
+
+
+
+#### 3.2.2.10. 序列化
+
+Vppinfra 的序列化支持使程序员能够轻松地对复杂数据结构进行序列化和反序列化操作。
+
+底层的基本序列化 / 反序列化函数采用网络字节序（network byte-order），因此在小端（little-endian）主机上序列化的数据，在大端（big-endian）主机上反序列化时，不会出现结构兼容性问题。
+
+
+
+### 3.2.3. VLIB 向量处理库
+
+与 vlib 相关的文件位于 `./src/{vlib, vlibapi, vlibmemory}` 文件夹中。这些库提供向量处理支持，包括图节点调度、可靠多播支持、超轻量级协作多任务线程、命令行界面（CLI）、插件（.DLL）支持、物理内存和 Linux epoll 支持。
+
+
+
+#### 3.2.3.1. 初始化函数发现
+
+vlib 应用程序通过将结构体和带有__attribute__((constructor)) 属性的函数放入镜像中，来注册各种 [初始化] 事件。在适当的时候，vlib 框架会遍历由构造函数生成的单向链表结构列表，基于指定的**约束条件**执行拓扑排序，并调用相应的函数。vlib 应用程序利用这种机制来创建图节点、添加命令行接口（CLI）函数、启动协作式多任务线程等。
+
+vlib 应用程序总会包含多个 VLIB_INIT_FUNCTION（my_init_function）宏。
+
+每个初始化 / 配置等函数的返回类型都是 clib_error_t *。要确保函数在一切正常时返回 0，否则框架会报告错误并退出。
+
+vlib 应用程序必须链接到 vppinfra，且通常还会链接到其他库（如 VNET）。在后一种情况下，可能需要显式引用符号，否则该库的大部分内容可能会在运行时缺失。
+
+
+
+**初始化函数与约束指定**
+
+添加初始化函数很简单：
+
+```shell
+static clib_error_t *my_init_function (vlib_main_t *vm)
+{
+   /* ... initialize things ... */
+
+   return 0; // or return clib_error_return (0, "BROKEN!");
+}
+VLIB_INIT_FUNCTION(my_init_function);
+```
+
+
+
+如上所示，`my_init_function`会 “在某个时刻” 执行，但没有顺序保证。指定顺序约束也很简单：
+
+```shell
+VLIB_INIT_FUNCTION(my_init_function) =
+{
+   .runs_before = VLIB_INITS("we_run_before_function_1",
+                             "we_run_before_function_2"),
+   .runs_after = VLIB_INITS("we_run_after_function_1",
+                            "we_run_after_function_2),
+ };
+```
+
+
+
+也可以指定批量顺序约束，形式如 “a 然后 b 然后 c 然后 d”：
+
+```shell
+VLIB_INIT_FUNCTION(my_init_function) =
+{
+   .init_order = VLIB_INITS("a", "b", "c", "d"),
+};
+```
+
+
+
+可为单个初始化函数同时指定这三种顺序约束，尽管很难想象有这种必要。
+
+
+
+#### 3.2.3.2. 节点图初始化
+
+vlib 包处理应用程序通常会定义一组图节点来处理数据包。
+
+通过 `VLIB_REGISTER_NODE` 宏构造 `vlib_node_registration_t` 结构体是最常见的方式。在运行时，框架会将这些注册信息处理为有向图。在运行时向图中添加节点很容易，但框架不支持删除节点。
+
+vlib 提供多种类型的向量处理图节点，主要用于控制框架的调度行为。`vlib_node_registration_t`的`type`成员作用如下：
+
+- `VLIB_NODE_TYPE_PRE_INPUT` - 在所有其他节点类型之前运行
+- `VLIB_NODE_TYPE_INPUT` - 尽可能频繁地运行，在 pre_input 节点之后
+- `VLIB_NODE_TYPE_INTERNAL` - 仅当添加了待处理帧（pending frames）使其可运行时才运行
+- `VLIB_NODE_TYPE_PROCESS` - 仅当显式使其可运行时才运行。“Process” 节点实际上是协作多任务线程，必须在较短时间后显式挂起。
+
+若要准确理解图节点调度器，请阅读`./src/vlib/main.c:vlib_main_loop`。
+
+
+
+#### 3.2.3.3. 图节点调度器
+
+`Vlib_main_loop()`负责调度图节点。基本的向量处理算法极其简单，但即使长时间盯着代码也可能难以理解。
+
+其工作原理如下：某个或某组输入节点生成待处理的工作向量，图节点调度器将该工作向量推送通过有向图，根据需要进行细分，直到原始工作向量被完全处理。之后，该过程重复。
+
+这种机制本质上能使帧大小达到稳定平衡。原因如下：随着帧大小增加，每帧元素的处理时间会减少。这背后有几个相关因素在起作用，最简单的是向量处理对 CPU 一级指令缓存（L1 I-cache）的影响 —— 给定节点处理的第一个帧元素（数据包）会将节点调度函数载入 L1 I-cache，后续所有帧元素都会受益。随着帧元素数量增加，每个元素的处理成本会下降。
+
+在轻负载下，让图节点调度器全速运行会极度浪费 CPU 周期。因此，若当前帧大小较小，图节点调度器会通过`epoll`定时等待来等待工作。该机制有一定的滞后性，以避免在中断模式和轮询模式之间频繁切换。尽管图调度器支持中断和轮询模式，但当前默认的设备驱动程序并不支持。
+
+图节点调度器使用分层时间轮（hierarchical timer wheel），在计时器到期时重新调度 process 节点。
+
+
+
+## 3.3. 核心特性
+
+
+
+### 3.3.1. FIB 转发信息库
+
+本节介绍转发信息库（Forwarding Information Base，简称 FIB）的实现方式：分层的、与协议无关的。
+
+
+
+#### 3.3.1.1. 必备知识
+
+本节介绍一些必备的主题和术语，它们是理解 FIB 架构的基础。
+
+
+
+**图**
+
+FIB 本质上是一组相关图的集合。后续章节中经常会用到图论中的术语。引用维基百科的定义：
+
+…… 图是对一组对象的表示，其中某些对象对通过链接相连。这些相互关联的对象由称为顶点（也称为节点或点）的数学抽象表示，而连接某些顶点对的链接称为边（也称为弧或线）…… 边可以是有向的或无向的。
+
+在有向图中，边只能沿一个方向遍历 —— 从子顶点到父顶点。这样的命名是为了体现多对一的关系：一个子顶点有一个父顶点，但一个父顶点可以有多个子顶点。在无向图中，边可以双向遍历，但在 FIB 中，“父”“子” 的命名仍被保留，以表示多对一关系。同一父顶点的子顶点称为兄弟节点。从子顶点到父顶点的遍历被视为正向遍历，而从父顶点到多个子顶点的遍历被视为反向遍历。正向遍历成本较低，因为它从多个顶点出发，向少数顶点移动；反向遍历成本较高，因为它从少数顶点出发，访问多个顶点。
+
+子顶点与父顶点之间的多对一关系意味着，父对象的生命周期必须覆盖其子对象的生命周期。如果控制平面在子对象之前删除父对象，那么父对象必须以不完整状态存在，直到子对象本身被删除。同样，如果子对象在其父对象之前创建，父对象会以不完整状态被创建。这些不完整的对象是维持图依赖关系所必需的。没有它们，当父对象被添加时，要找到受影响的子对象就需要在众多数据库中搜索这些子对象。为了延长父对象的生命周期，其所有子对象都会对父对象持有一个锁 —— 这是一种简单的引用计数机制。因此，子对象在查找父对象时遵循 “添加或锁定 / 解锁” 语义，而非 “分配 / 释放” 语义。
+
+
+
+**前缀**
+
+用于描述前缀的一些术语：
+
+- 1.1.1.1 这是一个地址，因为它没有关联的掩码。
+- 1.1.1.0/24 这是一个前缀。
+- 1.1.1.1/32 这是一个主机前缀（掩码长度与地址长度相同）。
+
+若前缀 A 的掩码长度比前缀 B 长，则 A 比 B 更具体；若掩码长度更短，则 A 比 B 较不具体。例如，1.1.1.0/28 比 1.1.1.0/24 更具体。与更具体前缀重叠的较不具体前缀称为覆盖前缀。例如，1.1.1.0/24 是 1.1.1.0/28 的覆盖前缀，而 1.1.1.0/28 则称为被覆盖前缀。因此，覆盖前缀总是比其被覆盖的前缀更不具体。
+
+
+
+#### 3.3.1.2. 数据模型
+
+FIB 数据模型由两部分组成：控制平面（CP）和数据平面（DP）。
+
+控制平面数据模型表示由上层编程到 VPP 中的数据。
+
+数据平面模型则表示 VPP 在数据包被转发时，如何推导要对其执行的动作。
+
+
+
+##### 3.3.1.2.1. 控制平面
+
+
+
+
+
+
+
+##### 3.3.1.2.2. 数据平面
+
+
+
+
+
+
+
+
+
+
+
+## 3.4. 添加一个新插件或新特性
+
+
+
+### 3.4.1. 添加一个新插件
+
+
+
+#### 3.4.1.1. 策略选择
+
+插件可实现使用频率低、实验性或测试性的功能。在这种情况下，请默认禁用插件：
+
+```c
+/* *INDENT-OFF* */
+VLIB_PLUGIN_REGISTER () =
+{
+  .version = VPP_BUILD_VER,
+  .description = "Plugin Disabled by Default...",
+  .default_disabled = 1,
+};
+/* *INDENT-ON* */
+```
+
+除非插件通过 API 或调试 CLI 进行配置，否则请不要创建进程或其他动态数据结构。
+
+具体来说，请不要从 VLIB_INIT_FUNCTIONS 中初始化 bihash 表，尤其是当涉及的 bihash 模板没有 #define BIHASH_LAZY_INSTANTIATE 1 时。
+
+```c
+static clib_error_t * sample_init (vlib_main_t * vm)
+{
+  <snip>
+  /* DONT DO THIS! */
+  BV(clib_bihash_init (h, ...))
+  <snip>
+}
+VLIB_INIT_FUNCTION (sample_init);
+```
+
+相反，请添加一个 feature_init 函数：
+
+```c
+static void
+feature_init (my_main_t * mm)
+{
+  if (mm->feature_initialized == 0)
+    {
+      BV(clib_bihash_init)(mm->hash_table, ...)
+      /* Create Other Things, e.g a periodic process */
+      mm->feature_initialized = 1;
+    }
+}
+```
+
+并在每次启用该功能时，从调试 CLI 和 API 消息处理程序中调用它。
+
+
+
+#### 3.4.1.2. 如何创建一个新插件
+
+本节介绍 VPP 开发人员如何创建新插件并将其添加到 VPP 中。假设我们从 VPP 的 <工作区顶部> 开始。
+
+作为示例，我们将使用 `./extras/emacs` 中的 `make-plugin.sh` 工具。make-plugin.sh 是一个简单的包装器，用于从一组 emacs-lisp 骨架构建的综合插件生成器。
+
+切换到 `./src/plugins` 目录，运行插件生成器：
+
+```bash
+cd ./src/plugins
+../../extras/emacs/make-plugin.sh
+<snip>
+Loading /scratch/vpp-docs/extras/emacs/tunnel-c-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/tunnel-decap-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/tunnel-encap-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/tunnel-h-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/elog-4-int-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/elog-4-int-track-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/elog-enum-skel.el (source)...
+Loading /scratch/vpp-docs/extras/emacs/elog-one-datum-skel.el (source)...
+
+Plugin name: myplugin
+Dispatch type [dual or qs]: dual
+
+OK...
+```
+
+插件生成器脚本会提出两个问题：插件的名称，以及使用两种调度类型中的哪一种。
+
+由于插件名称会出现在很多地方 —— 文件名、类型定义名称、图弧名称等 —— 所以花点时间考虑一下是值得的。
+
+
+
+调度类型指的是用于构建 node.c（形式化数据平面节点）的编码模式。dual 选项构建带有推测性入队的双单循环对。这是负载存储密集型图节点的传统编码模式。
+
+qs 选项生成使用 vlib_get_buffers (...) 和 vlib_buffer_enqueue_to_next (...) 的四单循环对。这些操作能很好地利用可用的 SIMD 向量单元操作。如果之后决定更改，将四单循环对改为双单循环对非常简单。
+
+
+
+##### 3.4.1.2.1. 生成的文件
+
+以下是生成的文件。我们稍后会逐一介绍。
+
+```bash
+cd ./myplugin
+ls
+CMakeLists.txt  myplugin.api  myplugin.c  myplugin.h
+myplugin_periodic.c  myplugin_test.c  node.c  setup.pg
+```
+
+由于最近构建系统的改进，将新插件集成到 vpp 构建中无需修改任何其他文件。只需从头重建工作区，新插件就会出现。
+
+
+
+##### 3.4.1.2.2. 重建工作区
+
+以下是重新配置和重建工作区的简单方法：
+
+```bash
+cd <top-of-workspace>
+make rebuild [or rebuild-release]
+```
+
+得益于 ccache，此操作不会花费太多时间。
+
+
+
+##### 3.4.1.2.3. 完整性检查：运行 vpp
+
+作为快速完整性检查，运行 vpp 并确保加载了 “myplugin_plugin.so” 和 “myplugin_test_plugin.so”：
+
+```bash
+cd <top-of-workspace>
+make run
+<snip>
+load_one_plugin:189: Loaded plugin: myplugin_plugin.so (myplugin description goes here)
+<snip>
+load_one_vat_plugin:67: Loaded plugin: myplugin_test_plugin.so
+<snip>
+DBGvpp#
+```
+
+如果这个简单测试失败，请寻求帮助。
+
+
+
+#### 3.4.1.3. 生成文件详情
+
+本节详细讨论生成的文件。可以先略读本节，之后再回来了解更多细节。
+
+
+
+##### 3.4.1.3.1. CMakeLists.txt
+
+这是用于构建插件的构建系统配方。请修改版权声明：
+
+```c
+Copyright (c) <current-year> <your-organization>
+```
+
+
+
+构建配方的其余部分非常简单：
+
+```c
+add_vpp_plugin (myplugin
+SOURCES
+myplugin.c
+node.c
+myplugin_periodic.c
+myplugin.h
+
+MULTIARCH_SOURCES
+node.c
+
+API_FILES
+myplugin.api
+
+API_TEST_SOURCES
+myplugin_test.c
+)
+```
+
+如你所见，构建配方包含多个文件列表。SOURCES 是 C 源文件列表。API_FILES 是插件的二进制 API 定义文件列表（通常一个文件就足够了），等等。
+
+MULTIARCH_SOURCES 列出了被认为对性能至关重要的数据平面图节点调度函数源文件。这些文件中的特定函数会被多次编译，以便它们能利用 CPU 特定功能。稍后会详细介绍。
+
+如果添加源文件，只需将它们添加到相应的列表中。
+
+
+
+##### 3.4.1.3.2. myplugin.h
+
+这是新插件的主要 #include 文件。除其他外，它定义了插件的 main_t 数据结构。这是添加特定问题数据结构的合适位置。请抵制在插件中创建一组静态变量或 [更糟糕的是] 全局变量的诱惑。处理插件之间的名称冲突不是任何人愿意做的事。
+
+
+
+##### 3.4.1.3.3. myplugin.c
+
+不太准确地说，myplugin.c 相当于 vpp 插件的 “main.c”。它的作用是将插件挂钩到 vpp 二进制 API 消息调度器，并将其消息添加到 vpp 的全局 “message-name_crc” 哈希表中。参见 “myplugin_init (...)”
+
+Vpp 本身使用 dlsym (...) 来查找由 VLIB_PLUGIN_REGISTER 宏生成的 vlib_plugin_registration_t：
+
+```c
+VLIB_PLUGIN_REGISTER () =
+  {
+    .version = VPP_BUILD_VER,
+    .description = "myplugin plugin description goes here",
+  };
+```
+
+Vpp 仅从包含该数据结构实例的插件目录加载.so 文件。
+
+你可以从命令行启用或禁用特定的 vpp 插件。默认情况下，插件会被加载。要更改此行为，请在 VLIB_PLUGIN_REGISTER 宏中设置 default_disabled：
+
+```c
+VLIB_PLUGIN_REGISTER () =
+  {
+    .version = VPP_BUILD_VER,
+    .default_disabled = 1
+    .description = "myplugin plugin description goes here",
+  };
+```
+
+样板生成器将图节点调度函数放置在 “device-input” 功能弧上。这可能有用，也可能没用。
+
+```c
+VNET_FEATURE_INIT (myplugin, static) =
+{
+  .arc_name = "device-input",
+  .node_name = "myplugin",
+  .runs_before = VNET_FEATURES ("ethernet-input"),
+};
+```
+
+如插件生成器所示，myplugin.c 包含一个通用 “请在某个接口上启用我的功能” 二进制 API 消息的二进制 API 消息处理程序。你会发现，设置 vpp 消息 API 表很简单。严重警告：该方案无法容忍小错误。例如：忘记添加 mainp->msg_id_base 可能会导致非常令人困惑的故障。
+
+如果你小心地修改生成的样板代码 —— 而不是尝试从基本原理构建代码 —— 你将节省大量时间和避免很多麻烦。
+
+
+
+##### 3.4.1.3.4. myplugin_test.c
+
+该文件包含二进制 API 消息生成代码，这些代码被编译成单独的.so 文件。“vpp_api_test” 程序加载这些插件，使你能够立即访问插件 API，用于外部客户端二进制 API 测试。
+
+vpp 本身加载测试插件，并通过 “binary-api” 调试 CLI 提供代码。这是在集成测试之前对二进制 API 进行单元测试的常用方法。
+
+
+
+##### 3.4.1.3.5. node.c
+
+这是生成的图节点调度函数。你需要重写它来解决手头的问题。保留节点调度函数的结构将节省大量时间和避免很多麻烦。
+
+即使对于专家来说，重新发明循环结构、入队模式等也是浪费时间。只需删除并替换示例的 1x、2x、4x 数据包处理代码，用与你要解决的问题相关的代码即可。
+
+
+
+##### 3.4.1.3.6. myplugin.api
+
+这包含 API 消息定义。这里我们只定义了一个名为 myplugin_enable_disable 的消息，以及一个由于 autoreply 关键字而仅包含返回值的隐式 myplugin_enable_disable_reply。
+
+.api 文件的语法参考可在 VPP API 语言中找到。
+
+用此消息处理二进制 API 将运行 myplugin.c 中定义为 vl_api_myplugin_enable_disable_t_handler 的处理程序。它将接收一个消息指针*mp（即 myplugin.api 中定义的结构），并应返回另一个回复类型的消息指针*rmp。这就是 REPLY_MACRO 的作用。
+
+需要注意的是，所有 API 消息都是网络字节序，而 vpp 是主机字节序，因此你需要使用：
+
+- u32 value = ntohl(mp->value);
+- rmp->value = htonl(value);
+
+现在你可以通过 GoLang 绑定使用此 API。
+
+
+
+##### 3.4.1.3.7. myplugin_periodic.c
+
+这定义了一个 VPP 进程，一个将无限运行并间歇性唤醒的例程，这里用于处理插件事件。
+
+需要注意的是，vlib_processes 不是线程安全的，当数据结构在工作线程之间共享时，应该对其加锁。
+
+
+
+##### 3.4.1.3.8. 插件的 互利协作
+
+在 vpp 的 VLIB_INIT_FUNCTION 函数中，经常会看到特定的初始化函数调用其他初始化函数：
+
+```c
+if ((error = vlib_call_init_function (vm, some_other_init_function))
+   return error;
+```
+
+如果一个插件需要调用另一个插件中的初始化函数，请使用 vlib_call_plugin_init_function 宏：
+
+```c
+if ((error = vlib_call_plugin_init_function (vm, "otherpluginname", some_init_function))
+   return error;
+```
+
+这允许插件初始化函数之间进行排序。
+
+如果希望获取另一个插件中符号的指针，请使用 vlib_plugin_get_symbol (...) API：
+
+```c
+void *p = vlib_get_plugin_symbol ("plugin_name", "symbol");
+```
+
+
+
+有关更多信息，你可以阅读 “./src/plugins” 目录中的许多示例插件。
+
+
+
+### 3.4.2. VPP 示例插件
+
+
+
+#### 3.4.2.1. 概述
+
+本 VPP 示例插件展示了如何创建一个能与 VPP 集成的新插件。示例代码实现了一个简单的 macswap 算法，以此演示插件运行时与 VPP 图层次结构、API 及 CLI 的集成。
+
+如需更深入的信息，请参阅示例代码中的注释。详见 sample.c。
+
+
+
+#### 3.4.2.2. 如何构建和运行示例插件
+
+- 现在（重新）构建 VPP。
+
+```bash
+make wipe
+```
+
+- 在进程范围内定义环境变量 “SAMPLE_PLUGIN=yes”
+
+```bash
+SAMPLE_PLUGIN=yes make build
+```
+
+- 或者在会话范围内定义，并构建 VPP。
+
+```bash
+export SAMPLE_PLUGIN=yes
+make build
+```
+
+- 现在运行 VPP，确保插件已加载。
+
+```bash
+$ make run
+...
+load_one_plugin:184: Loaded plugin: memif_plugin.so (Packet Memory Interface (experimetal))
+load_one_plugin:184: Loaded plugin: sample_plugin.so (Sample of VPP Plugin)
+load_one_plugin:184: Loaded plugin: nat_plugin.so (Network Address Translation)
+...
+DBGvpp#
+```
+
+
+
+
+
+
+
+### 3.4.3. 插件中的切换队列
+
+该插件提供了一个简化示例，展示如何在线程之间切换数据包。我用它来调试数据包跟踪器（packet-tracer）的切换跟踪支持功能。
+
+#### 3.4.3.1. 数据包生成器输入脚本
+
+```text
+packet-generator new {
+   name x
+   limit 5
+   size 128-128
+   interface local0
+   node handoffdemo-1
+   data {
+       incrementing 30
+   }
+}
+```
+
+
+
+#### 3.4.3.2. 使用 2 个工作线程启动 vpp
+
+
+
+
+
+#### 3.4.3.3. 启用跟踪，并启动数据包生成器
+
+
+
+
+
+#### 3.4.3.4. 样本运行
+
+
+
+
+
+
+
+
+
+
+
+## 3.6. 设备驱动
+
+
+
+### 3.6.1. 英特尔 AVF 设备驱动程序
+
+
+
+#### 3.6.1.4. 使用方法
+
+
+
+**系统设置**
+
+- 加载 VFIO 驱动：
+
+```shell
+sudo modprobe vfio-pci
+```
+
+- （仅无 IOMMU 的系统）启用不安全的 NOIOMMU 模式：
+
+```shell
+echo Y | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+```
+
+- 创建并绑定 SR-IOV 虚拟功能
+
+以下脚本用于创建 VF、分配 MAC 地址并将 VF 绑定到 vfio-pci：
+
+```bash
+#!/bin/bash
+
+if [ $USER != "root" ] ; then
+    echo "Restarting script with sudo..."
+    sudo $0 ${*}
+    exit
+fi
+
+setup () {
+  cd /sys/bus/pci/devices/${1}
+  driver=$(basename $(readlink driver))
+  if [ "${driver}" != "i40e" ]; then
+    echo ${1} | tee driver/unbind
+    echo ${1} | tee /sys/bus/pci/drivers/i40e/bind
+  fi
+  ifname=$(basename net/*)
+  echo 0 | tee sriov_numvfs > /dev/null
+  echo 1 | tee sriov_numvfs > /dev/null
+  ip link set dev ${ifname} vf 0 mac ${2}
+  ip link show dev ${ifname}
+  vf=$(basename $(readlink virtfn0))
+  echo ${vf} | tee virtfn0/driver/unbind
+  echo vfio-pci | tee virtfn0/driver_override
+  echo ${vf} | sudo tee /sys/bus/pci/drivers/vfio-pci/bind
+  echo  | tee virtfn0/driver_override
+}
+
+# 在PF 0000:3b:00.0上创建一个VF并分配MAC地址
+setup 0000:3b:00.0 00:11:22:33:44:00
+
+# 在PF 0000:3b:00.1上创建一个VF并分配MAC地址
+setup 0000:3b:00.1 00:11:22:33:44:01
+```
+
+
+
+**混杂模式**
+
+
+
+
+
+**L2欺骗检查**
+
+
+
+
+
+## 3.7. vpp 测试框架
+
+
+
+### 3.7.1. 概述
+
+VPP 测试框架的目标是简化 VPP 单元测试的编写、运行和调试。为此，选择了 Python 作为高级语言以实现快速开发，同时结合 scapy 提供创建和解析数据包的必要工具。
+
+
+
+### 3.7.2. 测试用例结构
+
+VPP 测试框架基于 Python 的 unittest 构建。VPP 测试框架中的测试套件由多个继承自 VppTestCase 的类组成，而 VppTestCase 本身又继承自 TestCase。测试类定义一个或多个测试函数，这些函数即作为测试用例。
+
+运行测试用例时的函数流程如下：
+
+- setUpClass <VppTestCase.setUpClass>：每个测试类会调用一次该函数，用于执行一次性的测试设置。如果该函数抛出异常，则所有测试函数都不会执行。
+- setUp <VppTestCase.setUp>：setUp 函数在每个测试函数运行前执行。如果该函数抛出除 AssertionError 或 SkipTest 之外的异常，则视为错误（而非测试失败）。
+- test_ <name>：这是测试用例的核心部分。它应执行测试场景，并使用 unittest 框架中的各种断言函数进行必要的检查。一个测试用例中可以包含多个 test_<name>方法。
+- tearDown <VppTestCase.tearDown>：tearDown 函数在每个测试函数后调用，用于执行部分清理工作。
+- tearDownClass <VppTestCase.tearDownClass>：在所有测试函数运行完成后调用一次，用于执行最终清理。
+
+
+
+### 3.7.3. 日志记录
+
+每个测试用例都会自动创建一个日志器（存储在 “logger” 属性中），基于 logging 模块实现。使用日志器的标准方法（debug ()、info ()、error () 等）可将日志消息输出到日志器。
+
+所有日志消息都会写入临时目录中的日志文件（见下文）。
+
+要控制输出到控制台的消息，可指定 V = 参数：
+
+```bash
+make test         # minimum verbosity
+make test V=1     # moderate verbosity
+make test V=2     # maximum verbosity
+```
+
+
+
+### 3.7.4. 并行测试执行
+
+VPP 测试框架的测试套件可并行运行。每个测试套件在 Python 多进程模块生成的独立进程中执行。
+
+子测试套件的结果通过管道发送到父进程，父进程在运行结束时汇总并总结这些结果。
+
+子进程中的标准输出、标准错误和日志会被重定向到父进程管理的独立队列中。这些队列中的数据会按照测试套件完成的顺序输出到父进程的标准输出。如果没有已完成的测试套件（如运行初期），则实时输出最后启动的测试套件的数据。
+
+要启用并行测试运行，需指定并行进程数：
+
+```bash
+make test TEST_JOBS=n       # 最多生成 n 个进程
+make test TEST_JOBS=auto    # 根据核心数和共享内存大小自动选择
+```
+
+
+
+### 3.7.5. 测试临时目录与 vpp 生命周期
+
+通过分离测试文件和 VPP 实例实现测试隔离。每个测试会创建一个临时目录，其名称用于生成共享内存前缀，该前缀用于运行 VPP 实例。临时目录名称包含测试类名以便于引用，例如对于名为 “TestVxlan” 的测试用例，目录可能命名为 vpp-unittest-TestVxlan-UNUP3j。这样，主机上运行的其他 VPP 实例与测试用的 VPP 实例之间就不会产生冲突。测试用例创建的所有临时文件都存储在该临时测试目录中。
+
+测试临时目录包含以下重要文件：
+
+- `log.txt` - 包含最高详细程度的日志输出
+- `pg*_in.pcap` - 注入 VPP 的最后一个数据包流，按接口命名，例如 pg0 的文件名为 pg0_in.pcap*
+- `pg*_out.pcap` - VPP 为接口创建的最后一个捕获文件，同样按接口命名，例如 pg1 的文件名为 pg1_out.pca
+- `history files` - 每当重启捕获或添加新流时，现有文件会被轮转并重命名，因此所有 pcap 文件都会被保存以备后续调试
+- core - 如果 VPP 产生核心转储，会存储在临时目录中
+- vpp_stdout.txt - 包含 VPP 输出到标准输出的内容
+- vpp_stderr.txt - 包含 VPP 输出到标准错误的内容
+
+注意：调用 “make test*” 或 “make retest*” 时，会自动删除现有名为 vpp-unittest-* 的临时目录，以保持临时目录干净。
+
+
+
+### 3.7.6. 虚拟环境
+
+Virtualenv 是一个 Python 模块，用于创建包含 VPP 测试框架所需依赖的环境，从而与系统级已安装的包分离。VPP 测试框架的 Makefile 会在 build-root 中自动创建虚拟环境，并在该环境中安装所需包。通过 make 测试目标执行测试时，会自动进入该环境。
+
+
+
+### 3.7.7. 命名约定
+
+大多数单元测试会进行某种数据包操作 —— 在 VPP 与连接到 VPP 的虚拟主机之间发送和接收数据包。涉及的端、地址等命名均从 VPP 视角出发：
+
+- local_prefix 用于 VPP 侧。例如，local_ip4 <VppInterface.local_ip4> 地址是分配给 VPP 接口的 IPv4 地址。
+- remote_prefix 用于虚拟主机侧。例如，remote_mac <VppInterface.remote_mac> 地址是分配给连接到 VPP 的虚拟主机的 MAC 地址。
+
+
+
+### 3.7.8. 自动生成的地址
+
+发送数据包通常需要提供一些地址，否则数据包会被丢弃。VPP 测试框架中的接口对象会根据（通常是）其索引自动提供地址，这确保了无冲突，并通过一致的寻址方案简化调试。
+
+测试用例开发者通常无需处理实际数值，而是使用对象的属性。地址通常有两种形式：“<address>” 和 “<address>n”—— 注意 “n” 后缀。前者是 Python 字符串，后者通过 socket.inet_pton 转换为网络字节序的原始格式 —— 这种格式适合作为 VPP API 的参数。
+
+
+
+例如，对于分配给 VPP 接口的 IPv4 地址：
+
+- local_ip4 - VPP 接口上的本地 IPv4 地址（字符串）
+- local_ip4n - 本地 IPv4 地址 —— 原始格式，适合作为 API 参数。
+
+这些地址需要通过 VppInterface.config_ip4 等 API 在 VPP 中配置后才能使用。更多细节请参见 VppInterface 的文档。
+
+默认情况下，L3 有一个每种类型的远程地址：remote_ip4 和 remote_ip6。如果测试需要更多地址（如模拟更多远程主机），可使用 generate_remote_hosts API 生成，并通过 configure_ipv4_neighbors API 将其条目插入 ARP 表。
+
+
+
+### 3.7.9. vpp 测试框架中的数据包流向
+
+
+
+#### 3.7.9.1. 测试框架 -> vpp
+
+VPP 测试框架不直接向 VPP 发送数据包。流量通过包生成器接口（由 VppPGInterface 类表示）注入。数据包被写入临时.pcap 文件，然后由 VPP 读取并注入到 VPP 环境中。
+
+要向接口添加数据包列表，调用该接口的 VppPGInterface.add_stream 方法。准备就绪后，调用 pg_start 方法启动 VPP 侧的包生成器。
+
+
+
+#### 3.7.9.2. vpp -> 测试框架
+
+同样，VPP 不直接向 VPP 测试框架发送数据包。而是使用包捕获功能将流量捕获并写入临时.pcap 文件，然后由 VPP 测试框架读取和分析。
+
+测试用例可使用以下 API 读取 pcap 文件：
+
+- VppPGInterface.get_capture：该 API 适用于批量测试场景 —— 准备并发送数据包列表，然后读取并验证接收的数据包。该 API 需要预期捕获的数据包数量（忽略过滤的数据包 —— 见下文），以确定 VPP 是否已完全写入 pcap 文件。如果使用数据包信息验证数据包，则数据包信息的计数可被 VppPGInterface.get_capture 自动用于获取正确计数（此时可将 expected_count 的默认值设为 None 或省略）。
+
+- VppPGInterface.wait_for_packet：该 API 适用于交互式测试场景，例如会话管理、三次握手等。该 API 等待并返回单个数据包，保留捕获文件并记录上下文。重复调用会返回后续数据包（如果超时则抛出异常），均来自同一捕获文件（即同一接口上到达的数据包）。
+
+注意：除非了解其内部工作原理，否则不建议混合使用这些 API。这些 API 都不会轮转 pcap 捕获文件，因此例如在 VppPGInterface.wait_for_packet 之后调用 VppPGInterface.get_capture 会返回已读取的数据包。在调用 VppPGInterface.enable_capture 后（该 API 会轮转捕获文件），从一种 API 切换到另一种是安全的。
+
+
+
+#### 3.7.9.3. 数据包自动过滤
+
+两个 API（VppPGInterface.get_capture 和 VppPGInterface.wait_for_packet）默认会过滤包捕获结果，移除已知的非关注数据包 —— 即 IPv6 路由通告和 IPv6 路由警报。这些数据包是未经请求的，从 VPP 测试框架角度看是随机的。如果测试需要接收这些数据包，应将 “filter_out_fn” 参数的值指定为 None 或自定义过滤函数。
+
+
+
+#### 3.7.9.4. 发送 / 接收数据包的常见 API 流程
+
+我们以一个简单场景为例，描述从 pg0 接口向 pg1 接口发送数据包的流程，假设接口已通过 create_pg_interfaces API 创建。
+
+- 为 pg0 创建数据包列表：
+
+```c
+packet_count = 10
+packets = create_packets(src=self.pg0, dst=self.pg1,
+                         count=packet_count)
+```
+
+- 将数据包列表添加到源接口：
+
+```c
+self.pg0.add_stream(packets)
+```
+
+- 在目标接口上启用捕获：
+
+```c
+self.pg1.enable_capture()
+```
+
+- 启动包生成器：
+
+```c
+self.pg_start()
+```
+
+- 等待捕获文件出现并读取：
+
+```c
+capture = self.pg1.get_capture(expected_count=packet_count)
+```
+
+- 验证捕获的数据包与发送的数据包匹配：
+
+```c
+self.verify_capture(send=packets, captured=capture)
+```
+
+
+
+### 3.7.10. 测试框架对象
+
+以下对象提供 VPP 抽象，使测试用例能轻松执行常见任务：
+
+- VppInterface：抽象类，表示通用 VPP 接口，包含一些通用功能，供派生类使用
+- VppPGInterface：表示 VPP 包生成器接口的类。对象创建 / 销毁时，接口相应地创建 / 销毁。
+- VppSubInterface：VPP 子接口抽象类，包含 VppDot1QSubint 和 VppDot1ADSubint 等类的通用功能
+
+
+
+### 3.7.11. VPP API/CLI 的调用方式
+
+VPP 在 python 模块 vpp-papi 中提供 Python 绑定，测试框架会在虚拟环境中安装该模块。在 vpp-papi 之上构建了以 VppPapiProvider 类为代表的封装层，其作用如下：
+
+- 自动检查返回值：每次调用 API 后，会将返回值与预期返回值（默认 0，可覆盖）进行检查，若检查失败则抛出异常。
+
+- 自动调用钩子：
+  - before_cli <Hook.before_cli> 和 before_api <Hook.before_api > 钩子用于调试日志和单步执行测试
+  - after_cli <Hook.after_cli> 和 after_api <Hook.after_api > 钩子用于监控 VPP 进程是否崩溃
+- 简化 API 调用：许多 VPP API 需要大量参数，通过为这些参数提供合理默认值，使 API 在常见场景中更易用，代码更易读。例如，ip_add_del_route API 需要约 25 个参数，而在常见场景中只需 3 个。
+
+
+
+### 3.7.12. 工具方法
+
+一些实用的工具方法：
+
+- ppp：“Pretty Print Packet”—— 返回与 Scapy 的 packet.show () 输出相同的字符串
+
+- ppc：“Pretty Print Capture”—— 返回捕获内容的打印字符串（可配置捕获中打印的数据包数量上限），使用 ppp 实现
+
+注意：不要在测试中使用 Scapy 的 packet.show ()，因为它会将输出打印到标准输出。所有输出都应发送到测试用例关联的日志器。
+
+
+
+### 3.7.13. 例子：如何创建一个新测试
+
+在本示例中，我们将介绍如何添加一个测试基本 IPv4 转发功能的新测试用例。
+
+
+
+- 在测试目录中添加一个名为 test_ip4_fwd.py 的新文件，开头先导入几个必要的模块：
+
+```py
+from framework import VppTestCase
+from scapy.layers.l2 import Ether
+from scapy.packet import Raw
+from scapy.layers.inet import IP, UDP
+from random import randint
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 4. VPP 接口
+
+
+
+
+
+## 4.1. 二进制 API 模块
+
+
+
+
+
+### 4.1.1. 概述
+
+vpp vpi 模块允许通过共享内存接口与 vpp 通信。该 api 由三部分组成：
+
+- 公共代码——低级 api
+- 生成代码——高级 api
+- 代码生成器——用于为自定义插件生成专属高级 API
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 4.4. go api
+
+如果您正在编写需要控制和管理 VPP 的 Go 应用程序，GoVPP 是一个工具集，它提供了一个客户端库，允许您连接到 VPP 并与 VPP 的二进制 API、Stats API 等进行交互。
+
+
+
+### 4.4.1. 涉及的组件
+
+连接到 VPP 的 API 客户端由几个元素组成：
+
+首先，一切都源于 VPP 代码库中的 API 定义。消息定义存储在`*.api`文件中，您可以在大多数 VPP 插件中找到这类文件。
+
+该代码库包含一个 API 生成器，通过`make json-api-files`命令可将这些`.api`文件转换为`.json`文件，供特定语言的绑定使用。
+
+解析这些`.json`文件的程序名为`binapi-generator`，位于 GoVPP 中。它包含将`.json`文件转换为`.ba.go`文件的逻辑，生成的文件中包含与`.api`文件中定义的所有 API 消息匹配的适当结构体定义。
+
+GoVPP 代码库还包含用于连接 VPP 二进制 API 套接字的逻辑，以及用于通过该套接字发送和接收消息的封装器。
+
+
+
+### 4.4.2. 入门指南
+
+
+
+#### 4.4.2.1. 从 vpp 源码生成 api 绑定
+
+首先创建您的项目目录（注意路径，这对 Go 模块很重要）：
+
+```shell
+mkdir -p $HOME/myproject
+```
+
+
+
+在代码库的根目录运行绑定生成命令：
+
+```shell
+cd <vpp_repo_dir>/vpp
+make ARGS="--output-dir=$HOME/myproject/vppbinapi --import-prefix=mygit.com/myproject/vppbinapi" go-api-files
+```
+
+
+
+注意：这两个选项类似，但指定了不同的内容。
+
+- `output-dir`选项设置生成的绑定文件的存储目录。
+- `import-prefix`设置生成的绑定中使用的 Go 包名，这将是您在 Go 代码的`import ("")`中使用的字符串。两者可以匹配，也可以不匹配，具体取决于您的`go.mod`配置。
+
+执行后，会提示生成的 Go API 绑定所在的目录（例如：“Go API bindings were generated to myproject/vppbinapi”）。
+
+
+
+#### 4.4.2.2. 从 vpp 包生成 api 绑定
+
+您应该能在系统上找到相应的`api.json`文件，通常位于`/usr/share/vpp/api/`目录下。
+
+```shell
+# 首先安装二进制API生成器
+# 它将被安装到 $GOPATH/bin/binapi-generator 或 $HOME/go/bin/binapi-generator
+go install go.fd.io/govpp/cmd/binapi-generator@latest
+
+# 运行binapi-generator
+$GOPATH/bin/binapi-generator \
+  --input=/usr/share/vpp/api/ \
+  --output-dir=$HOME/myproject/vppbinapi \
+  --import-prefix=mygit.com/myproject/vppbinapi
+```
+
+这会将 Go 绑定输出到`$HOME/myproject/vppbinapi`目录。
+
+
+
+### 4.4.3. 启动 vpp
+
+```shell
+mkdir -p /tmp/vpp
+cat << EOF > /tmp/startup.conf
+unix {nodaemon cli-listen /tmp/vpp/api.sock}
+plugins {
+    path /vpp/build-root/install-vpp_debug-native/vpp/lib/x86_64-linux-gnu/vpp_plugins
+    plugin dpdk_plugin.so { disable }
+}
+EOF
+
+# 如果VPP是从源码构建的：
+<vpp_repo_dir>/build-root/install-vpp_debug-native/vpp/bin/vpp -c /tmp/startup.conf
+
+# 如果VPP是从包安装的：
+vpp -c /tmp/startup.conf
+```
+
+
+
+### 4.4.4. 连接到 vpp
+
+一旦在`$HOME/myproject/vppbinapi`目录中有了 Go 绑定，就可以开始构建使用它们的代理了。一个典型的代理如下：
+
+- 回到您的项目目录，添加 govpp 作为依赖：
+
+```shell
+cd "$HOME/myproject"
+go mod init mygit.com/myproject
+go get go.fd.io/govpp@latest
+```
+
+
+
+- 在`$HOME/myproject`目录下创建`main.go`，内容如下：
+
+```c
+package main
+
+import (
+    "os"
+    "fmt"
+
+    "go.fd.io/govpp"
+    "go.fd.io/govpp/api"
+
+    "mygit.com/myproject/vppbinapi/af_packet"
+    interfaces "mygit.com/myproject/vppbinapi/interface"
+    "mygit.com/myproject/vppbinapi/interface_types"
+)
+
+func CreateHostInterface(ch api.Channel, ifName string) (uint32, error) {
+    response := &af_packet.AfPacketCreateReply{}
+    request := &af_packet.AfPacketCreate{HostIfName: ifName}
+    err := ch.SendRequest(request).ReceiveReply(response)
+    if err != nil {
+        return 0, err
+    } else if response.Retval != 0 {
+        return 0, fmt.Errorf("AfPacketCreate failed: req %+v reply %+v", request, response)
+    }
+    return uint32(response.SwIfIndex), nil
+}
+
+func InterfaceAdminUp(ch api.Channel, swIfIndex uint32) error {
+    request := &interfaces.SwInterfaceSetFlags{
+        SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+        Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
+    }
+    response := &interfaces.SwInterfaceSetFlagsReply{}
+    err := ch.SendRequest(request).ReceiveReply(response)
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+func main() {
+    // Connect to VPP
+    conn, err := govpp.Connect("/tmp/vpp/api.sock")
+    defer conn.Disconnect()
+    if err != nil {
+        fmt.Printf("Could not connect: %s\n", err)
+        os.Exit(1)
+    }
+
+    // Open channel
+    ch, err := conn.NewAPIChannel()
+    defer ch.Close()
+    if err != nil {
+        fmt.Printf("Could not open API channel: %s\n", err)
+        os.Exit(1)
+    }
+
+    swIfIndex, err := CreateHostInterface(ch, "eth0")
+    if err != nil {
+        fmt.Printf("Could not create host interface: %s\n", err)
+        os.Exit(1)
+    }
+    err = InterfaceAdminUp(ch, swIfIndex)
+    if err != nil {
+        fmt.Printf("Could not set interface up: %s\n", err)
+        os.Exit(1)
+    }
+
+    fmt.Printf("Created host interface & set it up, id=%d\n", swIfIndex)
+}
+```
+
+
+
+- 最后，构建并启动应用程序。这将通过 API 套接字`/tmp/vpp/api.sock`连接到 VPP，在`eth0`上创建一个 AF_PACKET 接口并进行配置。
+
+```shell
+cd "$HOME/myproject"
+go build
+./myproject
+```
+
+
+
+
+
+
+
+
+
