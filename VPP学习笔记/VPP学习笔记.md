@@ -245,15 +245,25 @@ FD.io VPP 软件包存储在 Packagecloud.io 包仓库中。这里既有用于�
 
 
 
-## 2.1. VPP的下载和安装（Ubuntu/Debian）
+## 2.1. VPP的下载和安装
 
 
 
-### 2.1.1. 更新操作系统
+### 2.1.1. 在 Ubuntu / Debian 操作系统发行版上安装
 
-开始前，最好先更新和升级操作系统；运行以下命令升级操作系统并安装 curl 包，以便从 packagecloud.io 下载设置脚本：
 
-```shell
+
+#### 2.1.1.1. 设置 FD.io 仓库
+
+选择以下其中一个版本进行安装。
+
+
+
+##### 2.1.1.1.1. 更新操作系统
+
+开始之前，最好先更新和升级操作系统；运行以下命令来升级操作系统并安装 curl 包，以便从 packagecloud.io 下载设置脚本：
+
+```bash
 sudo apt-get update
 sudo apt-get dist-upgrade -y
 sudo apt-get install curl
@@ -261,19 +271,92 @@ sudo apt-get install curl
 
 
 
-### 2.1.2. 使用 Packagecloude 设置脚本配置 Apt
+##### 2.1.1.1.2. 使用 Packagecloud 设置脚本来配置 Apt
 
-FD.io Packagecloud 仓库提供了一个弹出菜单，可用于复制单行 bash 命令来获取 packagecloud 设置脚本。通常，操作步骤如下：
+FD.io Packagecloud 仓库提供了一个弹出菜单，可用于复制单行 bash 命令来获取 packagecloud 设置脚本。通常，先访问 FD.io 的 packagecloud 网址：https://packagecloud.io/fdio
 
-- 首先访问 FD.io packagecloud 的 URL： https://packagecloud.io/fdio
+然后选择所需的仓库链接（例如 “release”），并在 “快速安装说明” 部分选择 “Debian” 软件包图标。当弹出对话框出现时，选择 “复制” 按钮将运行设置脚本的命令复制到服务器的终端中。
 
-- 然后选择所需的仓库链接（例如 “release”），并在 “快速安装说明” 部分选择 “Debian” 软件包图标。当弹出对话框出现时，点击 “复制” 按钮将运行设置脚本的命令复制到服务器的终端中。
+
+
+- vpp 发布版本仓库
+
+安装最新 VPP 发布版的网址是：https://packagecloud.io/fdio/release
+
+
+
+- vpp 主分支仓库
+
+安装最新 VPP 发布版的网址是：https://packagecloud.io/fdio/release
+
+
+
+- vpp 稳定发布分支仓库
+
+稳定发布分支命名为 “stable/YYMM”（例如 stable/2206），相关的 packagecloud 仓库命名为 “YYMM”（例如 2206）。例如，VPP 22.06 稳定发布分支软件包仓库的网址是：https://packagecloud.io/fdio/2206
+
+
+
+#### 2.1.1.2. 安装必须的软件包
+
+运行以下命令安装必需的软件包：
+
+```bash
+sudo apt-get update
+sudo apt-get install vpp vpp-plugin-core vpp-plugin-dpdk
+```
+
+
+
+#### 2.1.1.3. 安装可选的软件包
+
+运行以下命令安装可选的软件包：
+
+```bash
+sudo apt-get install vpp-api-python python3-vpp-api vpp-dbg vpp-dev
+```
+
+
+
+#### 2.1.1.4. 卸载软件包
+
+运行以下命令卸载软件包：
+
+```bash
+sudo apt-get remove --purge "vpp*"
+```
+
+
+
+#### 2.1.1.5. 移除 FD.io Apt 源列表
+
+运行以下命令移除由 packagecloud apt 设置脚本创建的 FD.io Apt 源列表文件：
+
+```bash
+sudo rm /etc/apt/sources.list.d/fdio*.list
+```
+
+
+
+
+
+### 2.1.2. 包描述
+
+
+
+
+
+
 
 
 
 
 
 ## 2.2. VPP的运行
+
+
+
+### 2.2.1. 用户组
 
 安装 VPP 时，会创建一个新的用户组 ”vpp“。为避免以 root 身份运行 VPP 命令行界面（vppctl），请将所有需要与 VPP 交互的现有用户添加到这个新组中：
 
@@ -288,6 +371,8 @@ newgrp vpp
 ```
 
 
+
+### 2.2.2. 系统文件 vpp.service
 
 安装 VPP 时，也会安装一个 systemd 服务文件。
 
@@ -317,6 +402,8 @@ WantedBy=multi-user.target
 > 注意：部分旧版本的 “uio_pci_generic” 驱动无法正确绑定所有支持的网卡，因此需要安装从 DPDK 构建的 “igb_uio” 驱动。该服务文件控制启动时加载哪个驱动，而 “startup.conf” 文件控制实际使用哪个驱动。
 
 
+
+### 2.2.3. 大页内存
 
 VPP 运行期间需要大页内存来管理大型内存页。安装 VPP 时，它会覆盖现有的大页设置。默认情况下，VPP 将系统的大页数量设置为 1024 个 2M 大页。这是系统级别的大页数量，而非仅 VPP 使用的数量。
 
@@ -454,6 +541,8 @@ vagrant ssh
 
 现在虚拟机已更新，我们将安装 VPP 软件包。有关安装 VPP 的更多信息，请参考  ["下载和安装VPP"](https://s3-docs.fd.io/vpp/25.10/gettingstarted/installing/index.html#installingvpp) 
 
+
+
 在本教程中，我们将通过修改 /etc/apt/sources.list.d/99fd.io.list 文件来安装 VPP。向该文件写入以下内容：
 
 ```shell
@@ -574,13 +663,336 @@ ps -eaf | grep vpp
 root      2067     1  2 05:12 ?        00:00:00 /usr/bin/vpp -c startup1.conf
 vagrant   2070   903  0 05:12 pts/0    00:00:00 grep --color=auto vpp
 kill -9 2067
+
 ps -eaf | grep vpp
 vagrant   2074   903  0 05:13 pts/0    00:00:00 grep --color=auto vpp
 ```
 
 
 
-### 2.3.3. 
+### 2.3.3. 创建一个接口
+
+
+
+#### 2.3.3.1. 需要学习的技能
+
+1. 在 Linux 主机中创建 veth 接口
+2. 为 Linux 主机中的 veth 接口的一端分配 IP 地址
+3. 创建 vpp 主机接口，通过 AF_PACKET 与 veth 接口的一端相连
+4. 为 vpp 接口添加 IP 地址
+
+
+
+#### 2.3.3.2. 本练习中学习的 vpp 命令
+
+
+
+
+
+#### 2.3.3.3. 拓扑结构
+
+![image-20251012233352193](./assets/image-20251012233352193.png)
+
+
+
+#### 2.3.3.4. 初始状态
+
+此处的初始状态默认是本教程前面章节结束时的状态。
+
+
+
+#### 2.3.3.5. 在主机上创建 veth 接口
+
+在 Linux 中，有一种接口类型称为 “veth”。可以将 “veth” 接口理解为具有两端（而非一端）的接口。
+
+- 创建一个 veth 接口，一端命名为 vpp1out，另一端命名为 vpp1host：
+
+```bash
+sudo ip link add name vpp1out type veth peer name vpp1host
+```
+
+
+
+- 启用两端接口：
+
+```bash
+sudo ip link set dev vpp1out up
+sudo ip link set dev vpp1host up
+```
+
+
+
+#### 2.3.3.6. 分配 IP 地址
+
+- 添加 ip 地址
+
+```bash
+sudo ip addr add 10.10.1.1/24 dev vpp1host
+```
+
+- 查询结果
+
+```bash
+ip addr show vpp1host
+
+5: vpp1host@vpp1out: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+  link/ether e2:0f:1e:59:ec:f7 brd ff:ff:ff:ff:ff:ff
+  inet 10.10.1.1/24 scope global vpp1host
+     valid_lft forever preferred_lft forever
+  inet6 fe80::e00f:1eff:fe59:ecf7/64 scope link
+     valid_lft forever preferred_lft forever
+```
+
+
+
+#### 2.3.3.7. 创建 vpp 主机接口
+
+- 确保 vpp 正在运行，若未启动则启动它。
+
+```bash
+ps -eaf | grep vpp
+```
+
+
+
+- 创建 vpp 主机接口需要在 vpp shell 界面中运行，可以通过以下命令进入 vpp shell :
+
+```bash
+sudo vppctl -s /run/vpp/cli-vpp1.sock
+
+    _______    _        _   _____  ___
+ __/ __/ _ \  (_)__    | | / / _ \/ _ \
+ _/ _// // / / / _ \   | |/ / ___/ ___/
+ /_/ /____(_)_/\___/   |___/_/  /_/
+
+vpp#
+```
+
+
+
+- 创建一个附加到 vpp1out 的主机接口：
+
+```bash
+vpp# create host-interface name vpp1out
+
+# 输出
+host-vpp1out
+```
+
+
+
+- 确认创建
+
+```bash
+# 确认接口
+vpp# show hardware
+
+# 输出
+              Name                Idx   Link  Hardware
+host-vpp1out                       1     up   host-vpp1out
+Ethernet address 02:fe:d9:75:d5:b4
+Linux PACKET socket interface
+local0                             0    down  local0
+local
+```
+
+
+
+- 启动接口并确认已启用
+
+```bash
+# 启用接口
+vpp# set int state host-vpp1out up
+
+# 确认接口已启用：
+vpp# show int
+
+# 输出
+              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count
+host-vpp1out                      1      up          9000/0/0/0
+local0                            0     down          0/0/0/0
+```
+
+
+
+- 分配 IP 地址并确认
+
+```bash
+# 分配 IP 地址
+vpp# set int ip address host-vpp1out 10.10.1.2/24
+
+# 确认 IP 地址已分配
+vpp# show int addr
+
+# 输出
+host-vpp1out (up):
+  L3 10.10.1.2/24
+local0 (dn):
+```
+
+
+
+
+
+
+
+## 2.4. 故障排除
+
+本章介绍了用于排查和诊断 FD.io VPP 实现方案问题的多种技术中的一部分。
+
+
+
+### 2.4.1. CPU 负载 / 使用率
+
+有多种命令和工具可帮助用户在运行时查看 FD.io VPP 的 CPU 及内存使用率。
+
+#### 2.4.1.1. Linux 系统工具
+
+Linux 系统的`top`和`htop`是查看 FD.io VPP CPU 及内存使用率的实用工具，但它们仅能显示**预分配内存**和**总 CPU 使用率**。此外，这些命令还可用于查看 VPP 正在哪些 CPU 核心上运行。
+
+以下是 VPP 实例在 8 号和 9 号核心上运行的示例：要查看此类输出，需先输入`top`命令，待工具启动后再输入 “1” 即可。
+
+```bash
+top
+
+top - 11:04:04 up 35 days,  3:16,  5 users,  load average: 2.33, 2.23, 2.16
+Tasks: 435 total,   2 running, 432 sleeping,   1 stopped,   0 zombie
+Cpu0  :  1.0 us,  0.7 sy,  0.0 ni, 98.0 id,  0.0 wa,  0.0 hi,  0.3 si,  0.0 st
+Cpu1  :  2.0 us,  0.3 sy,  0.0 ni, 97.7 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu2  :  0.7 us,  1.0 sy,  0.0 ni, 98.3 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu3  :  1.7 us,  0.7 sy,  0.0 ni, 97.7 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu4  :  2.0 us,  0.7 sy,  0.0 ni, 97.4 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu5  :  3.0 us,  0.3 sy,  0.0 ni, 96.7 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu6  :  2.3 us,  0.7 sy,  0.0 ni, 97.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu7  :  2.6 us,  0.3 sy,  0.0 ni, 97.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu8  : 96.0 us,  0.3 sy,  0.0 ni,  3.6 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu9  :100.0 us,  0.0 sy,  0.0 ni,  0.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+Cpu10 :  1.0 us,  0.3 sy,  0.0 ni, 98.7 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+....
+```
+
+
+
+#### 2.4.1.2. vpp 内存使用率
+
+若需了解 VPP 内存使用率的详细信息，可使用`show memory`命令。以下是 VPP 在 2 个 CPU 核心上运行时的内存使用率示例。
+
+```bash
+# vppctl show memory verbose
+
+Thread 0 vpp_main
+22043 objects, 17878k of 20826k used, 2426k free, 2396k reclaimed, 346k overhead, 1048572k capacity
+  alloc. from small object cache: 22875 hits 39973 attempts (57.23%) replacements 5143
+  alloc. from free-list: 44732 attempts, 26017 hits (58.16%), 528461 considered (per-attempt 11.81)
+  alloc. from vector-expand: 3430
+  allocs: 52324 2027.84 clocks/call
+  frees: 30280 594.38 clocks/call
+Thread 1 vpp_wk_0
+22043 objects, 17878k of 20826k used, 2427k free, 2396k reclaimed, 346k overhead, 1048572k capacity
+  alloc. from small object cache: 22881 hits 39984 attempts (57.23%) replacements 5148
+  alloc. from free-list: 44736 attempts, 26021 hits (58.17%), 528465 considered (per-attempt 11.81)
+  alloc. from vector-expand: 3430
+  allocs: 52335 2027.54 clocks/call
+  frees: 30291 594.36 clocks/call
+```
+
+
+
+#### 2.4.1.3. vpp cpu 负载
+
+若要查看 VPP 的 CPU 负载（即 VPP 的繁忙程度），可使用`show runtime`命令。
+
+
+
+只要有至少一个接口处于**轮询模式（polling mode）** ，VPP 的 CPU 利用率就始终为 100%。
+
+
+
+“average vectors/node”（平均向量数 / 节点）是反映 CPU 负载的核心指标：
+
+- 数值越大，说明 VPP 越繁忙，但执行效率也越高；
+- 该指标的最大值为 255（除非在代码中修改`VLIB_FRAME_SIZE`参数）；
+- 其本质含义是 “单次批量处理的数据包数量”。
+
+
+
+负载与 VPP 行为的关联逻辑：
+
+- 若 VPP 负载较低：轮询速度会非常快，每次仅从**接收队列（rx queue）** 中获取 1 个或少量数据包（下方 “线程 1（Thread 1）” 的示例即为此类情况）。
+- 若 VPP 负载升高：需处理的任务增多，轮询频率会降低，导致更多数据包在接收队列中等待；等待的数据包越多，代码执行效率越高，“每数据包时钟周期数”（clock cycles /packet）会随之减少。
+- 若 “average vectors/node” 接近 255：此时接收队列可能因数据包堆积达到上限，你会开始观察到**接收队列尾丢弃（rx queue tail drops）** 现象（即队列尾部的新数据包被丢弃）。
+
+```bash
+vppctl show run
+Thread 0 vpp_main (lcore 8)
+Time 6152.9, average vectors/node 0.00, last 128 main loops 0.00 per node 0.00
+  vector rates in 0.0000e0, out 0.0000e0, drop 0.0000e0, punt 0.0000e0
+             Name                 State         Calls          Vectors        Suspends         Clocks       Vectors/Call
+acl-plugin-fa-cleaner-process  event wait                0               0               1          3.66e4            0.00
+admin-up-down-process          event wait                0               0               1          2.54e3            0.00
+....
+---------------
+Thread 1 vpp_wk_0 (lcore 9)
+Time 6152.9, average vectors/node 1.00, last 128 main loops 0.00 per node 0.00
+  vector rates in 1.3073e2, out 1.3073e2, drop 6.5009e-4, punt 0.0000e0
+             Name                 State         Calls          Vectors        Suspends         Clocks       Vectors/Call
+TenGigabitEthernet86/0/0-outpu   active             804395          804395               0          6.17e2            1.00
+TenGigabitEthernet86/0/0-tx      active             804395          804395               0          7.29e2            1.00
+arp-input                        active                  2               2               0          3.82e4            1.00
+dpdk-input                       polling       24239296364          804398               0          1.59e7            0.00
+error-drop                       active                  4               4               0          4.65e3            1.00
+ethernet-input                   active                  2               2               0          1.08e4            1.00
+interface-output                 active                  1               1               0          3.78e3            1.00
+ip4-glean                        active                  1               1               0          6.98e4            1.00
+ip4-icmp-echo-request            active             804394          804394               0          5.02e2            1.00
+ip4-icmp-input                   active             804394          804394               0          4.63e2            1.00
+ip4-input-no-checksum            active             804394          804394               0          8.51e2            1.00
+ip4-load-balance                 active             804394          804394               0          5.46e2            1.00
+ip4-local                        active             804394          804394               0          5.79e2            1.00
+ip4-lookup                       active             804394          804394               0          5.71e2            1.00
+ip4-rewrite                      active             804393          804393               0          5.69e2            1.00
+ip6-input                        active                  2               2               0          5.72e3            1.00
+ip6-not-enabled                  active                  2               2               0          1.56e4            1.00
+unix-epoll-input                 polling            835722               0               0         3.03e-3            0.00
+```
+
+
+
+### 2.4.2. Google 代码 sanitizer 工具集
+
+
+
+#### 2.4.2.1. AddressSanitizer
+
+
+
+
+
+
+
+### 2.4.3. 内存泄漏
+
+
+
+
+
+#### 2.4.3.1. 内存跟踪
+
+
+
+
+
+#### 2.4.3.2. libc 内存跟踪
+
+
+
+
+
+
+
+
+
+
 
 
 
