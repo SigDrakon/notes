@@ -1,4 +1,4 @@
-# 1. 什么是VPP
+
 
 FD.io 的矢量数据包处理器（Vector Packet Processor，简称 VPP）是一款高速、可扩展的 2-4 层多平台网络协议栈。它可在 Linux 用户空间运行，支持 x86、ARM 和 Power 等多种架构。
 
@@ -9,6 +9,10 @@ VPP 的高性能网络协议栈正迅速成为全球各类应用的首选网络�
 VPP 支持与 OpenStack 和 Kubernetes 集成。其网络管理功能包括配置、计数器、采样等。对于开发人员，VPP 提供了高性能事件日志记录和多种数据包跟踪功能；开发调试镜像则包含完整的符号表以及全面的一致性检查功能。
 
 VPP 的部分用例包括虚拟交换机（vSwitch）、虚拟路由器（vRouter）、网关、防火墙和负载均衡器等，仅举几例。
+
+
+
+# 1. 什么是VPP
 
 
 
@@ -235,7 +239,246 @@ FD.io VPP 的优势之一是其在相对低功耗计算设备上的高性能。�
 
 
 
-# 2. VPP的使用
+# 2. 使用案例
+
+
+
+## 2.1. vpp 与 容器
+
+本节将涵盖如何通过 VPP（矢量数据包处理）连接两个 Linux 容器。容器本质上是一种更高效、更快速的虚拟机，其原因在于容器无需模拟独立的内核和硬件。你可以点击此处了解有关 Linux 容器的更多相关内容。
+
+本节内容已在 Ubuntu 22.04 LTS（长期支持版）环境下测试通过。
+
+
+
+### 2.1.1. 创建容器
+
+确保你已经在想要创建容器的系统上完成了 VPP 的下载和安装。VPP 安装完成后，通过以下命令安装容器相关的软件包（如 lxc）：
+
+```bash
+sudo apt-get install bridge-utils lxc
+```
+
+
+
+正如 lxc.conf 手册页中所述：“容器配置存储在容器目录下的配置文件中。创建容器时，会生成一个基础配置，其中包含所选模板推荐的默认值以及来自 default.conf 文件的额外默认键值。”
+
+“该 default.conf 文件要么位于`/etc/lxc/default.conf`，对于非特权容器，要么位于`~/.config/lxc/default.conf`。”
+
+
+
+由于我们希望在两个容器之间进行 ping 测试，因此需要向该文件添加内容。查看 default.conf 的内容，初始内容应如下所示：
+
+```bash
+cat /etc/lxc/default.conf
+
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+```
+
+
+
+如你所见，默认情况下有一个 veth 接口。
+
+现在你需要向该文件追加内容，以便你创建的每个容器都有一个用于 Linux 网桥的接口和一个未使用的第二个接口。
+
+你可以通过将 echo 的输出通过管道传递给 tee 来实现，如下所示，每行用换行符`\n`分隔。或者，你可以使用 vi 等文本编辑器手动向该文件添加内容，但要确保拥有 root 权限。
+
+```bash
+echo -e "lxc.net.0.name = veth0\nlxc.net.1.type = veth\nlxc.net.1.name = veth_link1"  | sudo tee -a /etc/lxc/default.conf
+```
+
+
+
+再次检查内容以确认文件确实已修改：
+
+```bash
+cat /etc/lxc/default.conf
+
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+lxc.net.0.name = veth0
+lxc.net.1.type = veth
+lxc.net.1.name = veth_link
+```
+
+完成上述操作后，我们就可以创建容器了。
+
+
+
+- 创建一个名为 “cone” 的 Ubuntu Focal 容器：
+
+```bash
+lxc-create -t download -n cone -- --dist ubuntu --release focal --arch amd64
+```
+
+如果成功，你将得到类似如下的输出：
+
+```bash
+You just created an Ubuntu focal amd64 (20231027_07:42) container.
+
+To enable SSH, run: apt install openssh-server
+No default root or user password are set by LXC.
+```
+
+
+
+- 再创建一个容器 “ctwo”：
+
+```bash
+lxc-create -t download -n ctwo -- --dist ubuntu --release focal --arch amd64
+```
+
+
+
+- 列出你的容器以确认它们已存在：
+
+```bash
+lxc-ls
+
+cone ctwo
+```
+
+
+
+- 启动第一个容器
+
+```bash
+lxc-start --name cone
+```
+
+并确认它正在运行：
+
+```bash
+lxc-ls --fancy
+
+NAME  STATE   AUTOSTART  GROUPS  IPV4  IPV6  UNPRIVILEGED
+cone  RUNNING 0          -       -     -     false
+ctwo  STOPPED 0          -       -     -     false
+```
+
+
+
+### 2.1.2. 容器软件包
+
+
+
+
+
+
+
+### 2.1.3. 连接两个容器
+
+
+
+
+
+
+
+## 2.8. vpp 生成流量
+
+VPP 包含一个功能相当强大的网络模拟器插件，它可以模拟真实世界的往返时间和可配置的网络丢包率。这非常适合在特定的延迟 / 带宽 / 丢包条件下评估 TCP 协议栈的性能。
+
+“nsim” 插件在二层交叉连接两个物理接口，并引入指定的延迟和网络丢包参数。动态重新配置是可行的，但前提是网络模拟器调度轮中缓存的数据包将会丢失。
+
+
+
+### 2.8.1. 配置
+
+通过调试 CLI 进行配置很简单。首先，指定模拟器配置：单向延迟（所需 RTT 的一半）、链路带宽和预期的平均数据包大小。这些参数使网络模拟器能够分配适当的缓冲区大小，以实现所需的延迟 / 带宽乘积。
+
+```bash
+set nsim delay 25.0 ms bandwidth 10 gbit packet-size 128
+```
+
+
+
+要模拟网络丢包，可添加 “packets-per-drop（每丢包数）” 或 “drop-fraction [0.0…1.0]（丢包率 [0.0…1.0]）” 参数：
+
+```bash
+set nsim delay 25.0 ms bandwidth 10 gbit packet-size 128 packets-per-drop 10000
+```
+
+
+
+记得配置二层交叉连接：
+
+```bash
+nsim enable-disable <接口1> <接口2>
+```
+
+
+
+### 2.8.2. 数据包生成配置
+
+以下是 VPP 数据包生成器的单元测试配置：
+
+```bash
+loop cre  # 创建环回接口
+set int ip address loop0 11.22.33.1/24  # 设置loop0接口的IP地址为11.22.33.1/24
+set int state loop0 up  # 设置loop0接口为启动状态
+
+loop cre  # 创建环回接口
+set int ip address loop1 11.22.34.1/24  # 设置loop1接口的IP地址为11.22.34.1/24
+set int state loop1 up  # 设置loop1接口为启动状态
+
+set nsim delay 1.0 ms bandwidth 10 gbit packet-size 128 packets-per-drop 1000  # 配置nsim参数
+nsim enable-disable loop0 loop1  # 启用loop0和loop1的nsim交叉连接
+
+packet-generator new {  # 新建数据包生成器配置
+    name s0  # 名称为s0
+    limit 10000  # 限制生成10000个数据包
+    size 128-128  # 数据包大小为128-128字节
+    interface loop0  # 绑定到loop0接口
+    node ethernet-input  # 关联到ethernet-input节点
+    data {  # 数据包数据
+           IP4: 1.2.3 -> 4.5.6  # IP4：源1.2.3 -> 目的4.5.6
+           UDP: 11.22.33.44 -> 11.22.34.44  # UDP：源11.22.33.44 -> 目的11.22.34.44
+           UDP: 1234 -> 2345  # UDP：源端口1234 -> 目的端口2345
+           incrementing 114  # 自增114
+    }
+}
+```
+
+
+
+为了更贴近真实场景，网络模拟器会按指定概率丢弃特定数据包。在这个示例中，我们可以看到每次运行的结果会有细微差异，这是正常现象。
+
+```bash
+DBGvpp# pa en  # 启用数据包生成器
+DBGvpp# sh err  # 查看错误
+   计数         节点               原因
+      9991      nsim              缓存的数据包
+         9      nsim              网络丢包模拟丢弃的数据包
+      9991      ethernet-input    三层MAC不匹配
+
+DBGvpp# clear err  # 清除错误计数
+DBGvpp# pa en  # 启用数据包生成器
+DBGvpp# sh err  # 查看错误
+sh err
+   计数         节点               原因
+      9993      nsim              缓存的数据包
+         7      nsim              网络丢包模拟丢弃的数据包
+      9993      ethernet-input    三层MAC不匹配
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 3. VPP的使用
 
 如果想要使用 VPP，从现有软件包安装二进制文件会很方便。本指南介绍如何获取、安装和运行 VPP 软件包。
 
@@ -245,21 +488,21 @@ FD.io VPP 软件包存储在 Packagecloud.io 包仓库中。这里既有用于�
 
 
 
-## 2.1. VPP的下载和安装
+## 3.1. VPP的下载和安装
 
 
 
-### 2.1.1. 在 Ubuntu / Debian 操作系统发行版上安装
+### 3.1.1. 在 Ubuntu / Debian 操作系统发行版上安装
 
 
 
-#### 2.1.1.1. 设置 FD.io 仓库
+#### 3.1.1.1. 设置 FD.io 仓库
 
 选择以下其中一个版本进行安装。
 
 
 
-##### 2.1.1.1.1. 更新操作系统
+##### 3.1.1.1.1. 更新操作系统
 
 开始之前，最好先更新和升级操作系统；运行以下命令来升级操作系统并安装 curl 包，以便从 packagecloud.io 下载设置脚本：
 
@@ -1060,19 +1303,130 @@ VPP 原生 vmxnet3 驱动提供了标准 DPDK vmxnet3 驱动所不具备的以�
 
 
 
-# 3. 开发者文档
+# 4. 开发者文档
 
 
 
+## 4.1. 构建、运行和调试
 
 
-## 3.1. 构建、运行与调试
+
+### 4.1.1. 构建 VPP
 
 若要开始 VPP 开发，需获取所需的 VPP 源码，然后构建软件包。有关构建系统的更多详细信息，请参考《构建系统》（Build System）文档。
 
 
 
-### 3.1.1. 获取 vpp 源码
+#### 4.1.1.1. 环境安装
+
+若你并非在 WSL（Windows 子系统 Linux 版）的 Ubuntu 中下载 VPP，可忽略本节，直接跳至 “获取 VPP 源码”（Get the VPP Sources）部分。
+
+在 Ubuntu 系统上开始配置 VPP 前，需确保已安装 WSL2 和 Ubuntu。
+
+
+
+- 安装 WSL2 和 Ubuntu：以管理员身份运行 Windows PowerShell，在终端中输入以下命令：
+
+```bash
+wsl --install
+```
+
+
+
+- 配置 DNS：进入 Ubuntu 系统的`/etc`目录，找到`resolv.conf`文件。该文件通常在 Ubuntu 安装时自动生成，若不存在则手动创建。需使用`sudo`权限操作，避免出现 “File resolv.conf is unwritable”（文件 resolv.conf 不可写）错误：
+
+```bash
+cd /etc
+sudo nano resolv.conf
+```
+
+
+
+- 修改 DNS 服务器：在文件中，将当前的 “nameserver X.X.X.X” 行替换为以下内容：
+
+```bash
+nameserver 8.8.8.8
+```
+
+此操作会将机器的 DNS 服务器替换为谷歌 DNS 服务，以解决 DNS 网络连接问题。
+
+
+
+- 保持`resolv.conf`修改：默认情况下，每次重启 Ubuntu 时`resolv.conf`会重新生成，导致修改失效。若要保留修改，需运行以下命令将`resolv.conf`设置为不可变：
+
+```bash
+sudo chattr +i /etc/resolv.conf
+```
+
+
+
+- 配置`wsl.conf`：从`resolv.conf`中复制以下内容：
+
+```bash
+[network]
+generateResolvConf = false
+```
+
+进入`/etc`目录，编辑`wsl.conf`文件（同样需`sudo`权限，避免文件不可写错误）：
+
+```bash
+sudo nano wsl.conf
+```
+
+将上述复制的内容粘贴到`wsl.conf`中。
+
+
+
+- 测试 DNS 连接：在终端中执行`ping`命令测试 DNS 服务器连接：
+
+```bash
+ping 8.8.8.8
+```
+
+成功连接会显示类似以下的输出：
+
+```bash
+PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+64 bytes from 8.8.8.8: icmp_seq=1 ttl=116 time=9.58 ms
+64 bytes from 8.8.8.8: icmp_seq=2 ttl=116 time=45.8 ms
+64 bytes from 8.8.8.8: icmp_seq=3 ttl=116 time=9.62 ms
+64 bytes from 8.8.8.8: icmp_seq=4 ttl=116 time=11.4 ms
+64 bytes from 8.8.8.8: icmp_seq=5 ttl=116 time=12.2 ms
+64 bytes from 8.8.8.8: icmp_seq=6 ttl=116 time=8.69 ms
+64 bytes from 8.8.8.8: icmp_seq=7 ttl=116 time=52.4 ms
+64 bytes from 8.8.8.8: icmp_seq=8 ttl=116 time=11.0 ms
+...
+```
+
+
+
+- 更新系统与证书：保持在`/etc`目录下，运行以下命令更新系统并重装证书：
+
+```bash
+sudo apt-get update
+sudo apt-get dist-upgrade
+sudo apt-get install --reinstall ca-certificates
+sudo update-ca-certificates
+```
+
+
+
+- 准备获取源码：返回用户主目录，跳转至 “获取 VPP 源码” 部分。
+
+
+
+#### 4.1.1.2. 配置代理
+
+根据你所处的环境，可能需要配置代理。运行以下代理命令，指定代理服务器名称和对应端口号：
+
+```bash
+export http_proxy=http://<proxy-server-name>.com:<port-number>
+export https_proxy=https://<proxy-server-name>.com:<port-number>
+```
+
+
+
+#### 4.1.1.3. 获取 VPP 源码
 
 若要获取用于构建的 VPP 源码，请运行以下命令：
 
@@ -1081,9 +1435,15 @@ git clone https://gerrit.fd.io/r/vpp
 cd vpp
 ```
 
+
+
 VPP 的版本信息源自 git 描述信息（基于 git 标签生成）。若使用 GitHub 生成的压缩包，版本信息会从版本文件（`.../src/scripts/.version`）中缺失 —— 而在非 git 工作目录中构建时，版本脚本需要该文件，否则构建会失败。这种情况下，需在`.../src/scripts/.version`文件中填入所需的版本字符串，以满足版本脚本的要求。
 
+
+
 或者，在已克隆的 git 工作目录中执行`make dist`命令，会生成一个 xz 压缩格式的源码压缩包，其中包含`.../src/scripts/.version`文件（该文件使用 VPP 镜像的标准命名规则，包含 git 哈希值）。
+
+
 
 使用`-J`选项通过 xz 工具解压该压缩包，例如：
 
@@ -1093,7 +1453,7 @@ tar xvJf ./build-root/vpp-23.10-rc0~184-g48cd559fb.tar.xz
 
 
 
-### 3.1.2. 构建 vpp 依赖
+#### 4.1.1.4. 构建 VPP 依赖项
 
 在构建 VPP 镜像前，请确保系统中未安装 FD.io VPP 或 DPDK 软件包，可执行以下命令检查：
 
@@ -1114,66 +1474,56 @@ sudo apt install make
 
 
 
-执行以下 make 命令，安装 FD.io VPP 的依赖，若下载过程卡住，可能需要配置代理才能继续：
+执行以下 make 命令，安装 FD.io VPP 的依赖，若下载过程卡住，可能需要配置代理才能继续，成功安装依赖项会显示类似以下的输出（节选）：
 
 ```shell
 make install-dep
 
 Hit:1 http://us.archive.ubuntu.com/ubuntu xenial InRelease
 Get:2 http://us.archive.ubuntu.com/ubuntu xenial-updates InRelease [109 kB]
-Get:3 http://security.ubuntu.com/ubuntu xenial-security InRelease [107 kB]
-Get:4 http://us.archive.ubuntu.com/ubuntu xenial-backports InRelease [107 kB]
-Get:5 http://us.archive.ubuntu.com/ubuntu xenial-updates/main amd64 Packages [803 kB]
-Get:6 http://us.archive.ubuntu.com/ubuntu xenial-updates/main i386 Packages [732 kB]
-...
 ...
 Update-alternatives: using /usr/lib/jvm/java-8-openjdk-amd64/bin/jmap to provide /usr/bin/jmap (jmap) in auto mode
 Setting up default-jdk-headless (2:1.8-56ubuntu2) ...
 Processing triggers for libc-bin (2.23-0ubuntu3) ...
-Processing triggers for systemd (229-4ubuntu6) ...
-Processing triggers for ureadahead (0.100.0-19) ...
-Processing triggers for ca-certificates (20160104ubuntu1) ...
+...
 Updating certificates in /etc/ssl/certs...
 0 added, 0 removed; done.
 Running hooks in /etc/ca-certificates/update.d...
-
 done.
 done.
 ```
 
 
 
-### 3.1.3. 构建 vpp （debug）
+#### 4.1.1.5. 构建 VPP（debug 版本）
 
-此版本包含调试符号，对修改 VPP 代码非常有用。以下`make`命令用于构建 VPP 的调试版。构建调试镜像时，生成的二进制文件可在`/build-root/vpp_debug-native`目录中找到。
+此版本包含调试符号，对修改 VPP 代码非常有用。以下`make`命令用于构建 VPP 的调试版：
 
-调试版包含调试符号，便于问题排查或代码修改。执行以下`make`命令构建 VPP 调试版：
+```b
+make build
+```
+
+
+
+调试版镜像的二进制文件位于`/build-root/vpp_debug-native`目录下。构建过程会显示类似以下的输出（节选）：
 
 ```shell
-make build
-
 make[1]: Entering directory '/home/vagrant/vpp-master/build-root'
 @@@@ Arch for platform 'vpp' is native @@@@
 @@@@ Finding source for dpdk @@@@
 @@@@ Makefile fragment found in /home/vagrant/vpp-master/build-data/packages/dpdk.mk @@@@
 @@@@ Source found in /home/vagrant/vpp-master/dpdk @@@@
-@@@@ Arch for platform 'vpp' is native @@@@
-@@@@ Finding source for vpp @@@@
-@@@@ Makefile fragment found in /home/vagrant/vpp-master/build-data/packages/vpp.mk @@@@
-@@@@ Source found in /home/vagrant/vpp-master/src @@@@
-...
 ...
 make[5]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp/vpp-api/java'
 make[4]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp/vpp-api/java'
-make[3]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp'
-make[2]: Leaving directory '/home/vagrant/vpp-master/build-root/build-vpp_debug-native/vpp'
+...
 @@@@ Installing vpp: nothing to do @@@@
 make[1]: Leaving directory '/home/vagrant/vpp-master/build-root'
 ```
 
 
 
-### 3.1.4. 构建 vpp （release）
+#### 4.1.1.6. 构建 VPP （release 版本）
 
 本节介绍如何构建 FD.io VPP 的常规发布版。发布版经过优化，不包含任何调试符号。构建发布镜像时，生成的二进制文件可在`/build-root/vpp-native`目录中找到。
 
@@ -1185,7 +1535,7 @@ make build-release
 
 
 
-### 3.1.5. 安装外部依赖
+#### 4.1.1.7. 安装外部依赖项
 
 此时，仍有部分 VPP 外部依赖未安装。这些依赖可通过`make-build`安装，但该命令仅会将其安装在 VPP 目录树本地，而非操作系统中。为解决此问题并节省时间，运行以下命令：
 
@@ -1195,6 +1545,8 @@ make install-ext-deps
 
 
 
+##### 4.1.1.7.1. 构建所需软件包
+
 需构建的软件包类型取决于 VPP 将要运行的系统：
 
 - 若 VPP 运行在 Ubuntu 上，需构建 Debian 软件包
@@ -1202,39 +1554,61 @@ make install-ext-deps
 
 
 
-**构建 Debian 软件包**
+##### 4.1.1.7.2. 构建 Debian 包
 
-若要构建 Debian 软件包，执行以下命令：
+运行以下命令构建 Debian 包：
 
-```shell
+```bash
 make pkg-deb
 ```
 
 
 
+**Debian 系统上的可复现构建**
+
+默认情况下，VPP 制品中包含多种便于开发时识别的信息（如构建包的用户名、构建时间等）。若在构建环境中安装的依赖项完全相同，可通过设置几个环境变量，生成完全相同的.deb 文件。
+
+设置并使用`SOURCE_DATE_EPOCH`变量（参考：https://reproducible-builds.org/docs/source-date-epoch/），可完成大部分必要配置。
+
+`vpp-ext-deps`包已默认使用该变量，其值设为`build/external/`目录的最后修改时间（与`vpp-ext-deps`包版本命名中 “提交次数” 的推导方式类似）。
 
 
 
+对于其他包，固定以下三个变量，可在同一构建环境中多次构建生成完全相同的制品：
+
+```bash
+export SOURCE_DATE_EPOCH=$(date +%s)
+export VPP_BUILD_HOST="buildhost"
+export VPP_BUILD_USER="builduser"
+```
 
 
 
-
-
-构建 RPM 软件包
-
+若需在不同环境中复现完全相同的构建，可查看`build-root`目录下与.deb 仓库同级的`vpp_<BUILD_VERSION>.buildinfo`文件 —— 该文件包含新构建包的加密哈希值，以及完整的构建依赖项列表及其版本。
 
 
 
+##### 4.1.1.7.3. 构建 RPM 包
+
+根据操作系统，运行以下命令之一构建 RPM 包：
+
+```bash
+make pkg-rpm
+```
 
 
 
-**安装软件包**
+软件包构建完成后，可在`build-root`目录中找到。运行以下命令查看 Debian 包示例：
 
-软件包构建完成后，可在 build-root 目录中找到。执行以下命令查看：
-
-```shell
+```bash
 ls build-root/*.deb
+```
 
+
+
+若构建成功，会显示类似以下的输出：
+
+```plaintext
 vpp_18.07-rc0~456-gb361076_amd64.deb             vpp-dbg_18.07-rc0~456-gb361076_amd64.deb
 vpp-dev_18.07-rc0~456-gb361076_amd64.deb         vpp-api-lua_18.07-rc0~456-gb361076_amd64.deb
 vpp-lib_18.07-rc0~456-gb361076_amd64.deb         vpp-api-python_18.07-rc0~456-gb361076_amd64.deb
@@ -1243,49 +1617,235 @@ vpp-plugins_18.07-rc0~456-gb361076_amd64.deb
 
 
 
-使用以下命令安装生成的软件包：
+##### 4.1.1.7.4. 安装构建的软件包
 
-- Ubuntu 系统
+最后，使用以下命令安装构建好的软件包（根据 VPP 运行的操作系统选择对应命令）：
 
-```shell
+- Ubuntu 系统：
+
+```bash
 sudo dpkg -i build-root/*.deb
 ```
 
 
 
-- CentOS 系统或 Redhat 系统
+- CentOS 或 RedHat 系统：
 
-```shell
+```bash
 sudo rpm -ivh build-root/*.rpm
 ```
 
 
 
+### 4.1.2. 运行 VPP
 
-
-构建 VPP 二进制文件后，会生成多个镜像。这些镜像在**不需要安装软件包的情况下运行 VPP 时**非常有用，例如当你想用 GDB 调试 VPP 时。
-
-
-
-### 3.2.1. 不使用 gbd 运行
+构建完 VPP 二进制文件后，你会得到多个已构建好的镜像文件。当你无需安装软件包即可运行 VPP 时，这些镜像会非常有用，例如，当你希望使用 GDB（调试工具）调试运行 VPP 时。
 
 
 
+#### 4.1.2.1. 无需 GDB 运行 VPP
 
+若要运行已构建的 VPP 镜像且不使用 GDB，执行以下命令：
 
-### 3.2.1. 使用 gdb 运行
+- 运行发布版镜像
 
-
-
-
-
-## 3.2. 核心架构
-
-
+```bash
+make run-release
+```
 
 
 
-### 3.2.1. Software Architecture 软件架构
+- 运行调试版镜像
+
+```bash
+make run
+```
+
+
+
+#### 4.1.2.2. 使用 GDB 运行 VPP
+
+通过以下命令，你可以运行 VPP，随后进入 GDB 调试交互界面。
+
+在执行任一命令前，请确保已安装 “gdb” 软件包。若未安装，先执行以下命令：
+
+```bash
+sudo apt install gdb
+```
+
+
+
+- 运行发布版镜像（带 GDB 调试）
+
+```bash
+make debug-release
+```
+
+
+
+- 运行调试版镜像（带 GDB 调试）
+
+```bash
+make debug
+```
+
+
+
+### 4.1.3. 测试 VPP
+
+截至本文撰写时，VPP 源码树包含超过 1000 个单元测试向量。提交补丁供代码审查前的最佳实践是：确保 “make test” 命令的所有测试向量均能通过。
+
+我们会尽量维护顶层的 “make test-help” 命令，确保其能准确描述 “make test” 的所有选项。
+
+
+
+#### 4.1.3.1. 示例
+
+- 基础测试运行（所有测试向量、当个 VPP 实例、优化版镜像）
+
+```bash
+$ make test
+```
+
+
+
+- 10 路并行基础测试运行
+
+```bash
+# 注：TEST_JOBS=10 用于指定并行执行 10 个测试任务
+$ make TEST_JOBS=10 test
+```
+
+
+
+- 运行特定测试套件（本例中为 mpls 测试套件）
+
+
+
+```bash
+# 注：TEST=test_mpls 中的test_mpls为目标测试套件名称，可替换为其他套件名
+$ make TEST=test_mpls test
+```
+
+
+
+- 运行特定测试套件（调试版镜像）
+
+在运行测试套件前暂停，通过 gdb 附加到 VPP 镜像进行调试：
+
+```bash
+# 注：TEST=xxx 需替换为实际测试套件名称，DEBUG=gdb 用于启用 gdb 调试模式
+$ make TEST=xxx DEBUG=gdb test-debug
+```
+
+
+
+#### 4.1.3.2. 详细文档
+
+当前 “make test-help” 命令的输出如下：
+
+```bash
+$ make test-help
+Running tests:
+
+ test                   - build and run (basic) functional tests
+ test-debug             - build and run (basic) functional tests (debug build)
+ test-all               - build and run functional and extended tests
+ test-all-debug         - build and run functional and extended tests (debug build)
+ retest                 - run functional tests
+ retest-debug           - run functional tests (debug build)
+ retest-all             - run functional and extended tests
+ retest-all-debug       - run functional and extended tests (debug build)
+ test-cov               - generate code coverage report for test framework
+ test-gcov                      - build and run functional tests (gcov build)
+ test-wipe              - wipe (temporary) files generated by unit tests
+ test-wipe-cov          - wipe code coverage report for test framework
+ test-wipe-papi         - rebuild vpp_papi sources
+ test-wipe-all          - wipe (temporary) files generated by unit tests, and coverage
+ test-shell             - enter shell with test environment
+ test-shell-debug       - enter shell with test environment (debug build)
+ test-checkstyle        - check PEP8 compliance for test framework
+ test-refresh-deps      - refresh the Python dependencies for the tests
+
+Arguments controlling test runs:
+
+ V=[0|1|2]              - set test verbosity level
+                          0=ERROR, 1=INFO, 2=DEBUG
+ TEST_JOBS=[<n>|auto]   - use at most <n> parallel python processes for test execution, if auto, set to number of available cpus (default: 1)
+ MAX_VPP_CPUS=[<n>|auto]- use at most <n> cpus for running vpp main and worker threads, if auto, set to number of available cpus (default: auto)
+ CACHE_OUTPUT=[0|n|no]  - disable cache VPP stdout/stderr and log as one block after test finishes (default: yes)
+ FAILFAST=[1|y|yes]     - fail fast if 1, otherwise complete all tests
+ TIMEOUT=<timeout>      - fail test suite if any single test takes longer than <timeout> (in seconds) to finish (default: 600)
+ RETRIES=<n>            - retry failed tests <n> times
+ DEBUG=<type>           - set VPP debugging kind
+    DEBUG=core          - detect coredump and load it in gdb on crash
+    DEBUG=gdb           - allow easy debugging by printing VPP PID
+                          and waiting for user input before running
+                          and tearing down a testcase
+    DEBUG=gdbserver     - run gdb inside a gdb server, otherwise
+                          same as above
+    DEBUG=attach        - attach test case to already running vpp in gdb (see test-start-vpp-in-gdb)
+ STEP=[1|y|yes]         - enable stepping through a testcase (for testcase debugging)
+ SANITY=[0|n|no]        - disable sanity import of vpp-api/sanity vpp run before running tests
+ EXTENDED_TESTS=[1|y|yes] - run extended tests
+ TEST=<filter>          - filter the set of tests:
+    by file-name        - only run tests from specified file, e.g. TEST=test_bfd selects all tests from test_bfd.py
+    by file-suffix      - same as file-name, but 'test_' is omitted e.g. TEST=bfd selects all tests from test_bfd.py
+    by wildcard         - wildcard filter is <file>.<class>.<test function>, each can be replaced by '*'
+                          e.g. TEST='test_bfd.*.*' is equivalent to above example of filter by file-name
+                               TEST='bfd.*.*' is equivalent to above example of filter by file-suffix
+                               TEST='bfd.BFDAPITestCase.*' selects all tests from test_bfd.py which are part of BFDAPITestCase class
+                               TEST='bfd.BFDAPITestCase.test_add_bfd' selects a single test named test_add_bfd from test_bfd.py/BFDAPITestCase
+                               TEST='*.*.test_add_bfd' selects all test functions named test_add_bfd from all files/classes
+ VARIANT=<variant>      - specify which march node variant to unit test
+                          e.g. VARIANT=skx test the skx march variants
+                          e.g. VARIANT=icl test the icl march variants
+ COREDUMP_SIZE=<size>   - pass <size> as unix { coredump-size <size> } argument to vpp
+                          e.g. COREDUMP_SIZE=4g
+                               COREDUMP_SIZE=unlimited
+ COREDUMP_COMPRESS=[1|y|yes] - compress core files if not debugging them
+ EXTERN_TESTS=<path>    - path to out-of-tree test_<name>.py files containing test cases
+ EXTERN_PLUGINS=<path>  - path to out-of-tree plugins to be loaded by vpp under test
+ EXTERN_COV_DIR=<path>  - path to out-of-tree prefix, where source, object and .gcda files can be found for coverage report
+ PROFILE=[1|y|yes]      - enable profiling of test framework via cProfile module
+ PROFILE_SORT_BY=opt    - sort profiling report by opt - consult cProfile documentation for possible values (default: cumtime)
+ PROFILE_OUTPUT=file    - output profiling info to file - use absolute path (default: stdout)
+ TEST_DEBUG=[1|y|yes]   - enable debugging of the test framework itself (expert)
+ API_FUZZ=[1|y|yes]     - enable VPP api fuzz testing
+ RND_SEED=<seed>        - Seed RND with given seed
+
+Starting VPP in GDB for use with DEBUG=attach:
+
+ test-start-vpp-in-gdb       - start VPP in gdb (release)
+ test-start-vpp-debug-in-gdb - start VPP in gdb (debug)
+
+Creating test code coverage report:
+
+ test-cov               - generate code coverage report for test framework
+ test-wipe-cov          - wipe code coverage report for test framework
+
+Verifying code-style:
+
+ test-checkstyle        - check PEP8 compliance
+```
+
+
+
+### 4.1.4. GDB 示例
+
+
+
+
+
+
+
+
+
+## 4.2. 核心架构
+
+
+
+### 3.2.1. 软件架构
 
 fd.io VPP 的实现是第三代向量数据包处理实现，为了性能，VPP 数据平面由一个 **转发节点** 的 **有向图** 组成，该图在每次调用时处理多个数据包。
 
@@ -1693,6 +2253,645 @@ vlib 提供多种类型的向量处理图节点，主要用于控制框架的调
 在轻负载下，让图节点调度器全速运行会极度浪费 CPU 周期。因此，若当前帧大小较小，图节点调度器会通过`epoll`定时等待来等待工作。该机制有一定的滞后性，以避免在中断模式和轮询模式之间频繁切换。尽管图调度器支持中断和轮询模式，但当前默认的设备驱动程序并不支持。
 
 图节点调度器使用分层时间轮（hierarchical timer wheel），在计时器到期时重新调度 process 节点。
+
+
+
+
+
+
+
+### 4.2.4. VNET (VPP 网络栈)
+
+与 VPP 网络栈层相关的文件位于`./src/vnet`目录下。网络栈层本质上是其他层代码的实例化产物，该层包含一个 vnet 库，可提供**向量化的二层和三层网络图节点**、**数据包生成器**以及**数据包跟踪器**。
+
+在构建数据包处理应用时，vnet 会提供一个平台无关的子图，只需将若干个设备驱动节点连接到该子图即可。
+
+典型的接收端（RX）连接包括两类：
+
+- “ethernet-input”：支持完整的软件分类，可接入 ipv4-input、ipv6-input、arp-input 等节点。
+- “ipv4-input-no-checksum”：适用于硬件可执行分类和 IPv4 头部校验和计算的场景。
+
+
+
+#### 4.2.4.1. 高效的图调度函数编码
+
+过去 15 年间，图调度函数形成了多种编码风格，包括单循环 / 双循环 / 四循环编码模型（含多种变体）以及全流水线编码模型。
+
+
+
+#### 4.2.4.2. 单循环 / 双循环
+
+单循环 / 双循环 / 四循环模型的各类变体，可方便地解决 “待处理项数量预先未知” 的问题，典型场景如硬件接收环（RX-ring）处理。当某个节点无需执行复杂的依赖读取操作集时，这种编码风格也极为高效。
+
+以下是一个四循环 / 单循环示例，它可利用多达 AVX512 的 SIMD（单指令多数据）向量单元，将缓冲区索引转换为缓冲区指针：
+
+```c
+static uword
+simulated_ethernet_interface_tx (vlib_main_t * vm,
+              vlib_node_runtime_t *
+              node, vlib_frame_t * frame)
+{
+  u32 n_left_from, *from;
+  u32 next_index = 0;
+  u32 n_bytes;
+  u32 thread_index = vm->thread_index;
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_interface_main_t *im = &vnm->interface_main;
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
+  u16 nexts[VLIB_FRAME_SIZE], *next;
+
+  n_left_from = frame->n_vectors;
+  from = vlib_frame_vector_args (frame);
+
+  /*
+   * Convert up to VLIB_FRAME_SIZE indices in "from" to
+   * buffer pointers in bufs[]
+   */
+  vlib_get_buffers (vm, from, bufs, n_left_from);
+  b = bufs;
+  next = nexts;
+
+  /*
+   * While we have at least 4 vector elements (pkts) to process..
+   */
+  while (n_left_from >= 4)
+    {
+      /* Prefetch next quad-loop iteration. */
+      if (PREDICT_TRUE (n_left_from >= 8))
+    {
+      vlib_prefetch_buffer_header (b[4], STORE);
+      vlib_prefetch_buffer_header (b[5], STORE);
+      vlib_prefetch_buffer_header (b[6], STORE);
+      vlib_prefetch_buffer_header (b[7], STORE);
+        }
+
+      /*
+       * $$$ Process 4x packets right here...
+       * set next[0..3] to send the packets where they need to go
+       */
+
+       do_something_to (b[0]);
+       do_something_to (b[1]);
+       do_something_to (b[2]);
+       do_something_to (b[3]);
+
+      /* Process the next 0..4 packets */
+  b += 4;
+  next += 4;
+  n_left_from -= 4;
+ }
+  /*
+   * Clean up 0...3 remaining packets at the end of the incoming frame
+   */
+  while (n_left_from > 0)
+    {
+      /*
+       * $$$ Process one packet right here...
+       * set next[0..3] to send the packets where they need to go
+       */
+       do_something_to (b[0]);
+
+      /* Process the next packet */
+      b += 1;
+      next += 1;
+      n_left_from -= 1;
+    }
+
+  /*
+   * Send the packets along their respective next-node graph arcs
+   * Considerable locality of reference is expected, most if not all
+   * packets in the inbound vector will traverse the same next-node
+   * arc
+   */
+  vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+
+  return frame->n_vectors;
+}
+```
+
+在实现一项数据包处理任务时，四处查找类似任务并考虑使用相同的编码模式是值得的。在性能优化过程中，对某个图节点调度函数进行多次重新编码是很常见的情况。
+
+
+
+#### 4.2.4.3. 从头创建数据包
+
+有时需要从头创建并发送数据包，例如发送保活包（keepalives）或主动建立连接等场景。这类操作本身并不复杂，但需要正确设置缓冲区元数据（buffer metadata）。
+
+
+
+##### 4.2.4.3.1. 分配缓冲区
+
+使用`vlib_buffer_alloc`函数分配一组缓冲区索引。对于低性能应用，一次分配一个缓冲区是可行的。需注意，`vlib_buffer_alloc(…)`**不会初始化缓冲区元数据**，具体说明见下文。
+
+在高性能场景下，应先分配一个缓冲区索引向量（vector of buffer indices），从向量末尾取出索引进行分配；每分配一个缓冲区索引，就递减`_vec_len(..)`（向量长度）。可参考`tcp_alloc_tx_buffers(…)`和`tcp_get_free_buffer_index(…)`函数的实现示例。
+
+
+
+##### 4.2.4.3.2. 缓冲区初始化示例
+
+以下示例展示了缓冲区初始化的核心要点，但请勿盲目复制粘贴使用。
+
+```c
+u32 bi0;
+vlib_buffer_t *b0;
+ip4_header_t *ip;
+udp_header_t *udp;
+
+/* Allocate a buffer */
+if (vlib_buffer_alloc (vm, &bi0, 1) != 1)
+  return -1;
+
+b0 = vlib_get_buffer (vm, bi0);
+
+/* At this point b0->current_data = 0, b0->current_length = 0 */
+
+/*
+ * Copy data into the buffer. This example ASSUMES that data will fit
+ * in a single buffer, and is e.g. an ip4 packet.
+ */
+if (have_packet_rewrite)
+   {
+     clib_memcpy (b0->data, data, vec_len (data));
+     b0->current_length = vec_len (data);
+   }
+else
+   {
+     /* OR, build a udp-ip packet (for example) */
+     ip = vlib_buffer_get_current (b0);
+     udp = (udp_header_t *) (ip + 1);
+     data_dst = (u8 *) (udp + 1);
+
+     ip->ip_version_and_header_length = 0x45;
+     ip->ttl = 254;
+     ip->protocol = IP_PROTOCOL_UDP;
+     ip->length = clib_host_to_net_u16 (sizeof (*ip) + sizeof (*udp) +
+                vec_len(udp_data));
+     ip->src_address.as_u32 = src_address->as_u32;
+     ip->dst_address.as_u32 = dst_address->as_u32;
+     udp->src_port = clib_host_to_net_u16 (src_port);
+     udp->dst_port = clib_host_to_net_u16 (dst_port);
+     udp->length = clib_host_to_net_u16 (vec_len (udp_data));
+     clib_memcpy (data_dst, udp_data, vec_len(udp_data));
+
+     if (compute_udp_checksum)
+       {
+         /* RFC 7011 section 10.3.2. */
+         udp->checksum = ip4_tcp_udp_compute_checksum (vm, b0, ip);
+         if (udp->checksum == 0)
+           udp->checksum = 0xffff;
+    }
+    b0->current_length = vec_len (sizeof (*ip) + sizeof (*udp) +
+                                 vec_len (udp_data));
+
+  }
+b0->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
+
+/* sw_if_index 0 is the "local" interface, which always exists */
+vnet_buffer (b0)->sw_if_index[VLIB_RX] = 0;
+
+/* Use the default FIB index for tx lookup. Set non-zero to use another fib */
+vnet_buffer (b0)->sw_if_index[VLIB_TX] = 0;
+```
+
+如果你的用例需要传输大数据包，请使用`vlib_buffer_chain_append_data_with_alloc(…)`创建所需的缓冲区链。
+
+
+
+##### 4.2.4.3.3. 将数据包入队以进行查找和传输
+
+发送一组数据包的最简单方法是：使用`vlib_get_frame_to_node(…)`为`ip4_lookup_node`或`ip6_lookup_node`分配新帧，添加构建好的缓冲区索引，然后通过`vlib_put_frame_to_node(…)`调度该帧。
+
+```c
+vlib_frame_t *f;
+f = vlib_get_frame_to_node (vm, ip4_lookup_node.index);
+f->n_vectors = vec_len(buffer_indices_to_send);
+to_next = vlib_frame_vector_args (f);
+
+for (i = 0; i < vec_len (buffer_indices_to_send); i++)
+  to_next[i] = buffer_indices_to_send[i];
+
+vlib_put_frame_to_node (vm, ip4_lookup_node_index, f);
+```
+
+分配和调度单个数据包帧的效率很低。这种方式仅适用于 “每秒发送一个数据包” 等场景，绝不应在循环中使用！
+
+
+
+#### 4.2.4.4. 包跟踪器
+
+Vlib 包含帧元素（数据包）跟踪功能，配有简单的调试命令行界面（CLI）。操作很直观：使用`trace add 输入节点名 数量`开始捕获数据包跟踪记录。
+
+- 在运行 dpdk 插件的典型 x86_64 系统上，跟踪 100 个数据包：`trace add dpdk-input 100`。
+- 使用数据包生成器时：`trace add pg-input 100`。
+
+查看数据包跟踪记录：`show trace`。
+
+每个图节点都可以捕获自己的跟踪数据，这通常是很有必要的。跟踪捕获的 API 很简单：
+
+捕获时，API 会对二进制数据进行快照，以最小化捕获时的处理开销。每个参与跟踪的图节点在初始化时，都会提供一个 vppinfra 格式的用户函数，用于在 VLIB 执行`show trace`命令时格式化输出数据。
+
+只需将 VLIB 节点注册中的`.format_trace`成员设置为该图节点专属的格式化函数名即可。
+
+以下是一个简单示例：
+
+```c
+u8 * my_node_format_trace (u8 * s, va_list * args)
+{
+    vlib_main_t * vm = va_arg (*args, vlib_main_t *);
+    vlib_node_t * node = va_arg (*args, vlib_node_t *);
+    my_node_trace_t * t = va_arg (*args, my_trace_t *);
+
+    s = format (s, "我的跟踪数据为：%d", t-><具体字段>);
+
+    return s;
+}
+```
+
+当数据包快速经过时，跟踪框架会将捕获的数据传递给节点专属的格式化函数，该函数会按需求格式化输出数据。
+
+
+
+#### 4.2.4.5. 图形调度器的 pcap 跟踪
+
+VPP 图形调度器能够在调度数据包向量时，以 pcap 格式捕获它们。Pcap 捕获格式如下：
+
+```plaintext
+VPP graph dispatch trace record description:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Major Version | Minor Version | NStrings      | ProtoHint     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Buffer index (big endian)                                     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   + VPP graph node name ...     ...               | NULL octet    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Buffer Metadata ... ...                       | NULL octet    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Buffer Opaque ... ...                         | NULL octet    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Buffer Opaque 2 ... ...                       | NULL octet    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | VPP ASCII packet trace (if NStrings > 4)      | NULL octet    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Packet data (up to 16K)                                       |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+图形调度记录包含版本标记、记录头部后与数据包数据前的空终止字符串数量、以及协议提示。
+
+缓冲区索引是一个 32 位的透明标识，便于数据消费者在数据包经过转发图时轻松过滤 / 跟踪单个数据包。
+
+每个数据包对应多条记录是正常且常见的 —— 数据包在经过 VPP 转发图时会多次出现。因此，VPP 图形调度跟踪与终端的常规网络数据包捕获有显著差异，这一特性会增加有状态数据包分析的复杂度。
+
+将有状态分析限制在单个 VPP 图节点（如 “ethernet-input”）的记录中，可能会改善这种情况。
+
+截至本文撰写时：主版本号 = 1，次版本号 = 0。字符串数量（Nstrings）应为 4 或 5。消费者应警惕小于 4 或大于 5 的值：可以尝试显示声称的字符串数量，也可将此情况视为错误。
+
+```c
+typedef enum
+  {
+    VLIB_NODE_PROTO_HINT_NONE = 0,
+    VLIB_NODE_PROTO_HINT_ETHERNET,
+    VLIB_NODE_PROTO_HINT_IP4,
+    VLIB_NODE_PROTO_HINT_IP6,
+    VLIB_NODE_PROTO_HINT_TCP,
+    VLIB_NODE_PROTO_HINT_UDP,
+    VLIB_NODE_N_PROTO_HINTS,
+  } vlib_node_proto_hint_t;
+```
+
+例如：`VLIB_NODE_PROTO_HINT_IP6`表示数据包数据的第一个字节应为 0x60，且应起始于 IPv6 分组头部。
+
+下游数据消费者应关注协议提示，但必须容忍可能偶尔出现的不准确提示。
+
+
+
+##### 4.2.4.5.1. 调度 pcap 跟踪的调试 CLI
+
+
+
+
+
+##### 4.2.4.5.2. wireshark 解析调度 pcap 跟踪
+
+显然，我们开发了配套的 Wireshark 解析器来显示这些跟踪记录。截至本文撰写时，该解析器已提交至 Wireshark 上游。
+
+由于 Wireshark 的最新版本需要一段时间才能进入主流 Linux 发行版，请参考《如何构建支持 VPP 调度跟踪的 Wireshark》页面获取构建信息。
+
+以下是一个数据包解析示例（为简洁省略了部分字段）。关键在于，Wireshark 解析器能准确显示所有 VPP 缓冲区元数据以及相关图节点的名称。
+
+```plaintext
+Frame 1: 2216 bytes on wire (17728 bits), 2216 bytes captured (17728 bits)
+    Encapsulation type: USER 13 (58)
+    [Protocols in frame: vpp:vpp-metadata:vpp-opaque:vpp-opaque2:eth:ethertype:ip:tcp:data]
+VPP Dispatch Trace
+    BufferIndex: 0x00036663
+NodeName: ethernet-input
+VPP Buffer Metadata
+    Metadata: flags:
+    Metadata: current_data: 0, current_length: 102
+    Metadata: current_config_index: 0, flow_id: 0, next_buffer: 0
+    Metadata: error: 0, n_add_refs: 0, buffer_pool_index: 0
+    Metadata: trace_index: 0, recycle_count: 0, len_not_first_buf: 0
+    Metadata: free_list_index: 0
+    Metadata:
+VPP Buffer Opaque
+    Opaque: raw: 00000007 ffffffff 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    Opaque: sw_if_index[VLIB_RX]: 7, sw_if_index[VLIB_TX]: -1
+    Opaque: L2 offset 0, L3 offset 0, L4 offset 0, feature arc index 0
+    Opaque: ip.adj_index[VLIB_RX]: 0, ip.adj_index[VLIB_TX]: 0
+    Opaque: ip.flow_hash: 0x0, ip.save_protocol: 0x0, ip.fib_index: 0
+    Opaque: ip.save_rewrite_length: 0, ip.rpf_id: 0
+    Opaque: ip.icmp.type: 0 ip.icmp.code: 0, ip.icmp.data: 0x0
+    Opaque: ip.reass.next_index: 0, ip.reass.estimated_mtu: 0
+    Opaque: ip.reass.fragment_first: 0 ip.reass.fragment_last: 0
+    Opaque: ip.reass.range_first: 0 ip.reass.range_last: 0
+    Opaque: ip.reass.next_range_bi: 0x0, ip.reass.ip6_frag_hdr_offset: 0
+    Opaque: mpls.ttl: 0, mpls.exp: 0, mpls.first: 0, mpls.save_rewrite_length: 0, mpls.bier.n_bytes: 0
+    Opaque: l2.feature_bitmap: 00000000, l2.bd_index: 0, l2.l2_len: 0, l2.shg: 0, l2.l2fib_sn: 0, l2.bd_age: 0
+    Opaque: l2.feature_bitmap_input:   none configured, L2.feature_bitmap_output:   none configured
+    Opaque: l2t.next_index: 0, l2t.session_index: 0
+    Opaque: l2_classify.table_index: 0, l2_classify.opaque_index: 0, l2_classify.hash: 0x0
+    Opaque: policer.index: 0
+    Opaque: ipsec.flags: 0x0, ipsec.sad_index: 0
+    Opaque: map.mtu: 0
+    Opaque: map_t.v6.saddr: 0x0, map_t.v6.daddr: 0x0, map_t.v6.frag_offset: 0, map_t.v6.l4_offset: 0
+    Opaque: map_t.v6.l4_protocol: 0, map_t.checksum_offset: 0, map_t.mtu: 0
+    Opaque: ip_frag.mtu: 0, ip_frag.next_index: 0, ip_frag.flags: 0x0
+    Opaque: cop.current_config_index: 0
+    Opaque: lisp.overlay_afi: 0
+    Opaque: tcp.connection_index: 0, tcp.seq_number: 0, tcp.seq_end: 0, tcp.ack_number: 0, tcp.hdr_offset: 0, tcp.data_offset: 0
+    Opaque: tcp.data_len: 0, tcp.flags: 0x0
+    Opaque: sctp.connection_index: 0, sctp.sid: 0, sctp.ssn: 0, sctp.tsn: 0, sctp.hdr_offset: 0
+    Opaque: sctp.data_offset: 0, sctp.data_len: 0, sctp.subconn_idx: 0, sctp.flags: 0x0
+    Opaque: snat.flags: 0x0
+    Opaque:
+VPP Buffer Opaque2
+    Opaque2: raw: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    Opaque2: qos.bits: 0, qos.source: 0
+    Opaque2: loop_counter: 0
+    Opaque2: gbp.flags: 0, gbp.src_epg: 0
+    Opaque2: pg_replay_timestamp: 0
+    Opaque2:
+Ethernet II, Src: 06:d6:01:41:3b:92 (06:d6:01:41:3b:92), Dst: IntelCor_3d:f6    Transmission Control Protocol, Src Port: 22432, Dst Port: 54084, Seq: 1, Ack: 1, Len: 36
+    Source Port: 22432
+    Destination Port: 54084
+    TCP payload (36 bytes)
+Data (36 bytes)
+
+0000  cf aa 8b f5 53 14 d4 c7 29 75 3e 56 63 93 9d 11   ....S...)u>Vc...
+0010  e5 f2 92 27 86 56 4c 21 ce c5 23 46 d7 eb ec 0d   ...'.VL!..#F....
+0020  a8 98 36 5a                                       ..6Z
+    Data: cfaa8bf55314d4c729753e5663939d11e5f2922786564c21…
+    [Length: 36]
+```
+
+在 Wireshark 中，只需点击几下鼠标，就能将跟踪记录过滤到特定的**缓冲区索引**。通过这种过滤方式，你可以观察数据包在转发图中的传输过程，记录所有元数据变化、头部校验和变化等关键信息。
+
+这对开发新的 VPP 图节点非常有价值。如果新代码错误设置了`b->current_data`（缓冲区当前数据指针），通过 Wireshark 中的调度跟踪记录，这个问题会一目了然。
+
+
+
+#### 4.2.4.6. pcap 接收、发送与丢弃跟踪
+
+VPP 还支持通过 “`pcap trace`” 调试命令行界面（CLI），以 Pcap 格式捕获 “接收（rx）”“发送（tx）” 和 “丢弃（drop）” 的数据包。
+
+该命令可用于启动 / 停止数据包捕获，或查看捕获状态。“`pcap trace rx`”“`pcap trace tx`”“`pcap trace drop`” 均已实现，可同时指定 “rx”“tx”“drop” 中的一个或多个，以启用多种捕获类型。
+
+#### 命令可选参数说明
+
+- **rx**：跟踪接收的数据包。
+- **tx**：跟踪发送的数据包。
+- **drop**：跟踪丢弃的数据包。
+- **max nnnn**：文件大小（即数据包捕获数量）。捕获到指定数量的数据包后，跟踪缓冲区会刷新到目标文件。默认值为 1000，且仅当数据包捕获处于关闭状态时可修改。
+- **max-bytes-per-pkt nnnn**：单个数据包的最大捕获字节数。需满足 “大于 32 且小于 9000”，无默认值。
+- **filter**：使用已配置的 “pcap trace rx/tx/drop” 过滤器。过滤器需通过`classify filter pcap…`命令提前配置，且仅当接口级或全局接口检查失败时才会执行。
+- **intfc interface | any**：指定捕获数据包的接口；使用 “any” 时，表示在所有接口上捕获。未指定时默认值为 “any”，且会保留上一次捕获的接口设置，因此 “any” 也可用于重置接口设置。
+- **file filename**：指定输出文件名，文件会自动保存到`/tmp`目录。若文件已存在，会直接覆盖；未指定文件名时，会根据捕获方向自动使用`/tmp/rx.pcap`（接收）或`/tmp/tx.pcap`（发送）。仅当 Pcap 捕获关闭时可修改该参数。
+- **status**：显示当前数据包捕获的状态及已配置属性。若捕获正在进行，还会返回缓冲区中当前的数据包数量。与 “status” 同时输入的其他参数会被忽略。
+- **filter**：仅捕获与当前数据包跟踪过滤器匹配的数据包（需先配置捕获过滤器，详见下一节）。
+
+
+
+#### 4.2.4.7. 数据包跟踪捕获过滤
+
+“`classify filter pcap | <接口名> | trace`” 调试命令行界面（CLI）命令可构建任意一组数据包分类器表，用于 “`pcap trace rx | tx | drop`”（Pcap 接收 / 发送 / 丢弃跟踪），以及接口级或全局级的 VPP 包跟踪器。
+
+匹配分类器表链中规则的数据包将会被跟踪。这些表会自动排序，以便优先尝试最具体的表中的匹配项。
+
+通常，用户只需配置一个包含 1-2 条匹配规则的表即可。因此，默认配置为 8 个哈希桶和 128K 的匹配规则空间；也可根据需求，通过指定 “`buckets <数量>`” 和 “`memory-size <大小>`” 来覆盖默认值。
+
+若要构建复杂的过滤链，可重复执行 “`classify filter`” 调试 CLI 命令。每条命令必须指定所需的掩码（mask）和匹配值（match）：若已存在含合适掩码的分类器表，命令会向该表添加匹配规则；若不存在，则会新建表并添加指定的掩码规则。
+
+
+
+##### 4.2.4.7.1. 配置简单的 pcap 分类过滤器
+
+```bash
+classify filter pcap mask l3 ip4 src match l3 ip4 src 192.168.1.11
+pcap trace rx max 100 filter
+```
+
+
+
+##### 4.2.4.7.2. 配置简单的接口级捕获过滤器
+
+```bash
+classify filter GigabitEthernet3/0/0 mask l3 ip4 src match l3 ip4 src 192.168.1.11"
+pcap trace rx max 100 intfc GigabitEthernet3/0/0
+```
+
+注意：接口级捕获过滤器始终生效。
+
+
+
+##### 4.2.4.7.3. 清除接口级捕获过滤器
+
+```bash
+classify filter GigabitEthernet3/0/0 del
+```
+
+
+
+##### 4.2.4.7.4. 配置另一个简单的 pcap 分类过滤器
+
+```bash
+classify filter pcap mask l3 ip4 src dst match l3 ip4 src 192.168.1.10 dst 192.168.2.10
+pcap trace tx max 100 filter
+```
+
+
+
+##### 4.2.4.7.5. 配置 vpp 包跟踪过滤器
+
+```bash
+classify filter trace mask l3 ip4 src dst match l3 ip4 src 192.168.1.10 dst 192.168.2.10
+trace add dpdk-input 100 filter
+```
+
+
+
+##### 4.2.4.7.6. 清除所有当前分类器过滤器
+
+```bash
+classify filter [pcap | <接口名> | trace] del
+```
+
+
+
+##### 4.2.4.7.7. 查看分类器表
+
+```bash
+show classify table [verbose]
+```
+
+
+
+##### 4.2.4.7.8. mask 语法简要说明
+
+```bash
+l2 src dst proto tag1 tag2 ignore-tag1 ignore-tag2 cos1 cos2 dot1q dot1ad
+l3 ip4 <ip4-mask> ip6 <ip6-mask>
+<ip4-mask> version hdr_length src[/width] dst[/width]
+           tos length fragment_id ttl protocol checksum
+<ip6-mask> version traffic-class flow-label src dst proto
+           payload_length hop_limit protocol
+l4 tcp <tcp-mask> udp <udp_mask> src_port dst_port
+<tcp-mask> src dst  # ports
+<udp-mask> src_port dst_port
+```
+
+构建匹配规则时，需在 “mask” 语法的指定关键字后添加匹配值。例如：“`… mask l3 ip4 src`” 对应 “`… match l3 ip4 src 192.168.1.11`”
+
+
+
+#### 4.2.4.8. vpp 包生成器
+
+VPP 包生成器用于向转发图中注入数据包，支持重播 pcap 跟踪记录，也能以极高性能从头生成数据包。
+
+VPP 包生成器适用于多种场景，包括新数据平面节点的功能测试、回归测试以及性能调优。
+
+
+
+#### 4.2.4.9. PG 配置脚本
+
+PG 配置脚本会详细描述流量，并利用 VPP 调试 CLI 机制。通常，PG 配置脚本都会包含一定的接口和 FIB（转发信息库）配置，示例如下：
+
+```bash
+loop create  # 创建环回接口
+set int ip address loop0 192.168.1.1/24  # 为loop0设置IP地址
+set int state loop0 up  # 启动loop0接口
+
+packet-generator new {
+    name pg0  # 流名称
+    limit 100  # 启用流后发送的数据包数量
+    rate 1e6  # 数据包注入速率（此处为100万包/秒）
+    size 300-300  # 数据包大小范围（此处固定为300字节）
+    interface loop0  # 数据包模拟从该接口接收
+    node ethernet-input  # 关联到ethernet-input节点
+    data {  # 数据包数据定义
+           IP4: 1.2.3 -> 4.5.6  # IPv4头部：源MAC 00:01:00:02:00:03，目的MAC 00:04:00:05:00:06（ethertype为0x800）
+           UDP: 192.168.1.10 - 192.168.1.254 -> 192.168.2.10  # UDP：源IP范围192.168.1.10-254，目的IP固定为192.168.2.10
+           UDP: 1234 -> 2345  # UDP端口：源1234，目的2345
+           incrementing 286  # 插入最多286字节的自增数据（补全300字节数据包）
+    }
+}
+```
+
+包生成器流定义包含两个核心部分：流参数配置 和 数据包数据定义。
+
+
+
+##### 4.2.4.9.1. 流参数配置
+
+- **name pg0**：流的名称，此处为 “pg0”。
+- **limit 100**：启用流后发送的数据包数量，“limit 0” 表示持续发送。
+- **maxframe <nnn>**：最大帧大小，用于注入不超过<nnn>的多帧数据，适用于测试双循环 / 四循环代码。
+- **rate 1e6**：数据包注入速率（单位：包 / 秒），未指定时会以最大速率注入。
+- **size 300-300**：数据包大小范围，此处表示固定发送 300 字节的数据包。
+- **interface loop0**：数据包模拟从该接口接收，该参数会用于选择图弧特性配置和 IP FIB，可在该接口上配置特性以测试功能。
+- **tx-interface <name>**：数据包将从该接口发送，通常仅当向 IP 重写后的图节点注入数据包时需要指定。
+- **pcap <filename>**：从重播指定的 Pcap 文件中读取数据包，“make test” 会大量使用该特性（用 Scapy 生成数据包并保存为.pcap，再通过 PG 注入 VPP 图）。
+- **worker <nn>**：指定 VPP 工作线程生成该流的数据包。VPP PG 每核可生成并注入约 1000 万包 / 秒，可通过多流定义和多工作线程生成足够流量，轻松填满 40Gbps 链路（小数据包场景）。
+
+
+
+##### 4.2.4.9.2. 数据定义
+
+包生成器的数据定义采用分层实现策略，按网络层顺序指定，语法可能略显反直觉。上述示例中，数据定义部分构建了 L2-L4 头部，并通过自增填充数据补全 300 字节的数据包。
+
+- **IP4: 1.2.3 -> 4.5.6**：构建 L2（MAC）头部，ethertype 为 IPv4（0x800），源 MAC 为`00:01:00:02:00:03`，目的 MAC 为`00:04:00:05:00:06`。MAC 地址支持`xxxx.xxxx.xxxx`或`xx:xx:xx:xx:xx:xx`两种格式。
+- **UDP: 192.168.1.10 - 192.168.1.254 -> 192.168.2.10**：为连续数据包构建自增的 L3（IPv4）头部，源 IP 范围为`192.168.1.10-254`，目的 IP 固定为`192.168.2.10`，协议字段设为 17（UDP）。
+- **UDP: 1234 -> 2345**：设置 UDP 源端口为 1234，目的端口为 2345。
+- **incrementing 286**：插入最多 286 字节的自增数据。
+
+若需使用 IPv6，只需将 “IP4” 替换为 “IP6”，并改用 IPv6 地址格式即可。VPP PG 支持设置 IPv4 头部的所有字段（包括 TOS、数据包长度、分片标识 / 偏移、TTL、协议、校验和、源 / 目的 IP 等），详细可参考`../src/vnet/ip/ip[46]_pg.c`。
+
+若上述方式无法满足需求，还可直接用十六进制指定完整数据包数据：
+
+```bash
+hex 0xabcd…  # 将十六进制数据原样复制到数据包中
+```
+
+注：重播 Pcap 文件（`pcap <filename>`）时，无需指定 “data” 部分。
+
+
+
+##### 4.2.4.9.3. 诊断 ”packet-generator new“ 解析失败
+
+若要向全新的图节点注入数据包，需告知包生成器调试 CLI 如何解析 “data” 部分：
+
+- 若节点期望 L2 以太网 MAC 头部，需在节点注册中指定`.unformat_buffer = unformat_ethernet_header`，示例如下：
+
+```c
+VLIB_REGISTER_NODE (ethernet_input_node) =
+{
+  <省略部分代码>
+  .unformat_buffer = unformat_ethernet_header,
+  <省略部分代码>
+};
+```
+
+- 此外，可能需要在`../src/vnet/pg/cli.c`中设置断点调试，建议使用调试版（debug image）。
+
+调试新节点时，直接注入以太网帧（并在新节点中添加对应的`vlib_buffer_advance`），通常比修改包生成器更简单。
+
+
+
+#### 4.2.4.10. 调试 CLI
+
+除上述 “`packet-generator new`” 外，常用的调试 CLI 命令还包括：
+
+- 启用指定流，或所有流：
+
+```bash
+vpp# packet-generator enable [<stream-name>]
+```
+
+- 禁用指定流，或所有流：
+
+```bash
+vpp# packet-generator disable [<stream-name>]
+```
+
+- 删除指定流：
+
+```bash
+vpp# packet-generator delete <stream-name>
+```
+
+- 修改流参数（无需重建整个流）：
+
+```bash
+vpp# packet-generator configure <stream-name> [limit <nnn>]
+     [rate <f64-pps>] [size <nn>-<nn>]
+```
+
+注：重新执行 “`packet-generator new`” 可正确重建指定名称的流。
+
+
 
 
 
@@ -2250,17 +3449,17 @@ setup 0000:3b:00.1 00:11:22:33:44:01
 
 
 
-## 3.7. vpp 测试框架
+## 4.7. vpp 测试框架
 
 
 
-### 3.7.1. 概述
+### 4.7.1. 概述
 
 VPP 测试框架的目标是简化 VPP 单元测试的编写、运行和调试。为此，选择了 Python 作为高级语言以实现快速开发，同时结合 scapy 提供创建和解析数据包的必要工具。
 
 
 
-### 3.7.2. 测试用例结构
+### 4.7.2. 测试用例结构
 
 VPP 测试框架基于 Python 的 unittest 构建。VPP 测试框架中的测试套件由多个继承自 VppTestCase 的类组成，而 VppTestCase 本身又继承自 TestCase。测试类定义一个或多个测试函数，这些函数即作为测试用例。
 
@@ -2274,7 +3473,7 @@ VPP 测试框架基于 Python 的 unittest 构建。VPP 测试框架中的测试
 
 
 
-### 3.7.3. 日志记录
+### 4.7.3. 日志记录
 
 每个测试用例都会自动创建一个日志器（存储在 “logger” 属性中），基于 logging 模块实现。使用日志器的标准方法（debug ()、info ()、error () 等）可将日志消息输出到日志器。
 
@@ -2290,7 +3489,7 @@ make test V=2     # maximum verbosity
 
 
 
-### 3.7.4. 并行测试执行
+### 4.7.4. 并行测试执行
 
 VPP 测试框架的测试套件可并行运行。每个测试套件在 Python 多进程模块生成的独立进程中执行。
 
@@ -2307,7 +3506,7 @@ make test TEST_JOBS=auto    # 根据核心数和共享内存大小自动选择
 
 
 
-### 3.7.5. 测试临时目录与 vpp 生命周期
+### 4.7.5. 测试临时目录与 vpp 生命周期
 
 通过分离测试文件和 VPP 实例实现测试隔离。每个测试会创建一个临时目录，其名称用于生成共享内存前缀，该前缀用于运行 VPP 实例。临时目录名称包含测试类名以便于引用，例如对于名为 “TestVxlan” 的测试用例，目录可能命名为 vpp-unittest-TestVxlan-UNUP3j。这样，主机上运行的其他 VPP 实例与测试用的 VPP 实例之间就不会产生冲突。测试用例创建的所有临时文件都存储在该临时测试目录中。
 
@@ -2325,13 +3524,13 @@ make test TEST_JOBS=auto    # 根据核心数和共享内存大小自动选择
 
 
 
-### 3.7.6. 虚拟环境
+### 4.7.6. 虚拟环境
 
 Virtualenv 是一个 Python 模块，用于创建包含 VPP 测试框架所需依赖的环境，从而与系统级已安装的包分离。VPP 测试框架的 Makefile 会在 build-root 中自动创建虚拟环境，并在该环境中安装所需包。通过 make 测试目标执行测试时，会自动进入该环境。
 
 
 
-### 3.7.7. 命名约定
+### 4.7.7. 命名约定
 
 大多数单元测试会进行某种数据包操作 —— 在 VPP 与连接到 VPP 的虚拟主机之间发送和接收数据包。涉及的端、地址等命名均从 VPP 视角出发：
 
@@ -2340,7 +3539,7 @@ Virtualenv 是一个 Python 模块，用于创建包含 VPP 测试框架所需�
 
 
 
-### 3.7.8. 自动生成的地址
+### 4.7.8. 自动生成的地址
 
 发送数据包通常需要提供一些地址，否则数据包会被丢弃。VPP 测试框架中的接口对象会根据（通常是）其索引自动提供地址，这确保了无冲突，并通过一致的寻址方案简化调试。
 
@@ -2359,11 +3558,11 @@ Virtualenv 是一个 Python 模块，用于创建包含 VPP 测试框架所需�
 
 
 
-### 3.7.9. vpp 测试框架中的数据包流向
+### 4.7.9. vpp 测试框架中的数据包流向
 
 
 
-#### 3.7.9.1. 测试框架 -> vpp
+#### 4.7.9.1. 测试框架 -> vpp
 
 VPP 测试框架不直接向 VPP 发送数据包。流量通过包生成器接口（由 VppPGInterface 类表示）注入。数据包被写入临时.pcap 文件，然后由 VPP 读取并注入到 VPP 环境中。
 
@@ -2371,7 +3570,7 @@ VPP 测试框架不直接向 VPP 发送数据包。流量通过包生成器接�
 
 
 
-#### 3.7.9.2. vpp -> 测试框架
+#### 4.7.9.2. vpp -> 测试框架
 
 同样，VPP 不直接向 VPP 测试框架发送数据包。而是使用包捕获功能将流量捕获并写入临时.pcap 文件，然后由 VPP 测试框架读取和分析。
 
@@ -2385,13 +3584,13 @@ VPP 测试框架不直接向 VPP 发送数据包。流量通过包生成器接�
 
 
 
-#### 3.7.9.3. 数据包自动过滤
+#### 4.7.9.3. 数据包自动过滤
 
 两个 API（VppPGInterface.get_capture 和 VppPGInterface.wait_for_packet）默认会过滤包捕获结果，移除已知的非关注数据包 —— 即 IPv6 路由通告和 IPv6 路由警报。这些数据包是未经请求的，从 VPP 测试框架角度看是随机的。如果测试需要接收这些数据包，应将 “filter_out_fn” 参数的值指定为 None 或自定义过滤函数。
 
 
 
-#### 3.7.9.4. 发送 / 接收数据包的常见 API 流程
+#### 4.7.9.4. 发送 / 接收数据包的常见 API 流程
 
 我们以一个简单场景为例，描述从 pg0 接口向 pg1 接口发送数据包的流程，假设接口已通过 create_pg_interfaces API 创建。
 
@@ -2435,7 +3634,7 @@ self.verify_capture(send=packets, captured=capture)
 
 
 
-### 3.7.10. 测试框架对象
+### 4.7.10. 测试框架对象
 
 以下对象提供 VPP 抽象，使测试用例能轻松执行常见任务：
 
@@ -2445,7 +3644,7 @@ self.verify_capture(send=packets, captured=capture)
 
 
 
-### 3.7.11. VPP API/CLI 的调用方式
+### 4.7.11. VPP API/CLI 的调用方式
 
 VPP 在 python 模块 vpp-papi 中提供 Python 绑定，测试框架会在虚拟环境中安装该模块。在 vpp-papi 之上构建了以 VppPapiProvider 类为代表的封装层，其作用如下：
 
@@ -2458,7 +3657,7 @@ VPP 在 python 模块 vpp-papi 中提供 Python 绑定，测试框架会在虚�
 
 
 
-### 3.7.12. 工具方法
+### 4.7.12. 工具方法
 
 一些实用的工具方法：
 
@@ -2470,7 +3669,7 @@ VPP 在 python 模块 vpp-papi 中提供 Python 绑定，测试框架会在虚�
 
 
 
-### 3.7.13. 例子：如何创建一个新测试
+### 4.7.13. 例子：如何创建一个新测试
 
 在本示例中，我们将介绍如何添加一个测试基本 IPv4 转发功能的新测试用例。
 
@@ -2492,21 +3691,13 @@ from random import randint
 
 
 
-
-
-
-
-
-
-
-
 # 4. VPP 接口
 
 
 
 
 
-## 4.1. 二进制 API 模块
+## 4.1. 二进制 api 
 
 
 
@@ -2532,7 +3723,7 @@ vpp vpi 模块允许通过共享内存接口与 vpp 通信。该 api 由三部�
 
 
 
-## 4.4. go api
+## 4.4. go api 客户端
 
 如果您正在编写需要控制和管理 VPP 的 Go 应用程序，GoVPP 是一个工具集，它提供了一个客户端库，允许您连接到 VPP 并与 VPP 的二进制 API、Stats API 等进行交互。
 
