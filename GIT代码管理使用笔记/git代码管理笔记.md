@@ -30,6 +30,8 @@
 - CI/CD 友好：可以针对分支触发自动化测试、构建。
 
 
+
+
 ## 1.2.前置问题2：新分支需不需要删除？
 
 要删除，除非它仍在使用，当分支功能已经合并进 dev 并经过验证后，就可以：
@@ -40,6 +42,8 @@ git push origin --delete feature/my-feature  # 删除远程分支
 ```
 
 这样可以保持远程仓库干净，避免出现上百个历史分支。
+
+
 
 ## 2.具体的代码提交示例
 
@@ -97,3 +101,104 @@ git push origin dev
 git branch -d feature/upf-li-support
 git push origin --delete feature/upf-li-support
 ```
+
+
+
+
+
+# 2. 分支管理及命名规范
+
+
+
+
+
+## 2.1. 分支分类
+
+
+
+一般情况下，Git 分支可以分成 主分支 和 临时分支。
+
+- 主分支一般为 Master 和 Develop，前者用于正式发布，后者用于日常开发。
+
+- 临时分支也叫辅助分支，临时性分支用于应对一些特定目的的版本开发。临时分支一般分为三种，feature、release 和 fixbug。
+
+以上三种临时分支都属于临时性需要，使用完以后，应该删除，使得代码库的常设分支始终只有 Master 和 Develop。
+
+
+
+### 2.1.1. 开发分支
+
+开发分支，顾名思义就是开发使用的分支，这个分支可以用来生成代码的最新隔夜版本（nightly）。如果想要正式对外发布，就在 Master 分支上，对 Develop 分支进行合并。
+
+- 创建分支
+
+```bash
+git branch develop
+
+git push -u origin develop
+```
+
+
+
+- 拉取 feature
+
+```bash
+git checkout -b feature/add-new-feature develop
+
+git push -u origin feature
+```
+
+
+
+- 合并 feature
+
+```bash
+git pull origin develop
+
+git checkout develop
+
+git merge --no-ff feature/add-new-feature
+
+git push origin develop
+```
+
+
+
+### 2.1.2. 预发布分支
+
+预发布分支，是指发布正式版本之前（即合并到 Master 分支之前），我们可能需要一个预发布的版本进行测试。预发布分支是从 Develop 分支上面分出来的，预发布结束之后，必须合并进 Develop 和 Master 分支。它的命名可以采用 release-* 的形式
+
+- 创建分支
+
+```bash
+git checkout -b release-1.2.1 develop
+```
+
+
+
+- 合并分支
+
+```bash
+# 合并到 master 分支
+git checkout master
+
+git merge --no-ff release-1.2.1
+
+git tag -a 1.2.1
+
+# 合并到 develop 分支
+git checkout develop
+
+git merge --no-ff release-1.2.1
+```
+
+
+
+- 删除分支
+
+```bash
+git branch -d release-1.2.1
+```
+
+
+
