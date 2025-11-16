@@ -1,5 +1,35 @@
 
 
+# 1. StrongSwan 文档
+
+
+
+## 1.1. 介绍
+
+[strongSwan](./test.md)
+
+
+
+## 1.2. 配置示例
+
+
+
+### 1.2.1. 基于现代 VICI 接口的场景
+
+
+
+
+
+### 1.2.2. 基于传统 Stroke 接口的场景
+
+
+
+
+
+
+
+
+
 
 
 # 1. StrongSwan 简介
@@ -9,28 +39,6 @@
 
 
 ## 1.1. 网络安全防护
-
-
-
-StrongSwan 是一套完整的 IPSec 解决方案，可为服务器和客户端提供加密与认证功能。它可用于保护与远程网络的通信，让远程连接体验与本地连接一致。
-
-![topology](./assets/topology.png)
-
-- Gateway：
-
-  网关通常是防火墙，也可以是网络中的任意主机。网关通常还能为小型网络提供 DHCP 和 DNS 服务。在图示中，主机 moon 和 sun 分别是内部主机 alice、venus 和 bob 的网关。
-
-- Remote Access / Roadwarrior Clients：
-
-  漫游客户端通常指笔记本电脑及其他移动设备，它们通过网关远程连接到家庭网络。在图示中，carol 和 dave 代表漫游客户端，它们希望访问两个网关背后的任意一个网络。
-
-- Remote Hosts / Host-to-Host：
-
-  远程主机可以是远程 Web 服务器或备份系统。图示中，主机 winnetou 与网关 moon、sun 中的任意一个的连接，就是该场景的示例。两台主机之间的连接通常可由任意一方发起。
-
-- Remote Sites / Site-to-Site：
-
-  位于不同地点的两个或多个子网中的主机，应能实现互访。再次参考图示，网关 moon 和 sun 背后的两个子网（10.1.0.0/16 和 10.2.0.0/16）可通过连接实现互访，例如主机 alice 和 bob 能安全地通信。
 
 
 
@@ -1255,6 +1263,64 @@ charon-cmd {
 | `**ikev1-xauth-am**`     | IKEv1，使用公钥进行客户端和服务器认证，随后进行客户端 XAuth 认证 |
 | `**ikev1-xauth-psk-am**` | IKEv1，使用预共享密钥（PSK）进行客户端和服务器认证，随后进行客户端 XAuth 认证。**不安全！！！** |
 | `**ikev1-hybrid-am**`    | IKEv1，仅使用公钥进行服务器认证，随后进行客户端 XAuth 认证   |
+
+
+
+
+
+
+
+# 8. Portability / OS
+
+
+
+
+
+
+
+
+
+
+
+# 10. 工具
+
+
+
+## 10.1. swanctl 工具
+
+
+
+### 10.1.1. 概述
+
+```bash
+swanctl --initiate         (-i)  initiate a connection              建立连接
+        --terminate        (-t)  terminate a connection             终止连接
+        --rekey            (-R)  rekey an IKE or CHILD_SA           重新生成IKE或CHILD_SA密钥
+        --install          (-p)  install a trap or shunt policy     安装陷阱策略或分流策略
+        --uninstall        (-u)  uninstall a trap or shunt policy   卸载陷阱策略或分流策略
+        --redirect         (-d)  redirect an IKE_SA				    重定向IKE安全联盟(IKE_SA)
+        --list-sas         (-l)  list currently active IKE_SAs      列出当前活跃的IKE安全联盟
+        --list-pols        (-P)  list currently installed policies  列出但概念已安装的策略
+        --list-conns       (-L)  list loaded configurations         列出已加载的配置
+        --list-authorities (-B)  list loaded certification authorities information        列出已加载的认证机构信息
+        --list-certs       (-x)  list stored certificates                                 列出存储的证书
+        --list-pools       (-A)  list loaded pool configurations                          列出已加载的地址池配置
+        --list-algs        (-g)  list loaded algorithms and their implementation          列出已加载的算法及其实现方式
+        --load-all         (-q)  (re-)load credentials, pools authorities and connections (重新)加载凭证、地址池、认证机构及连接配置
+        --load-authorities (-b)  (re-)load certification authorities information          (重新)加载认证机构信息
+        --load-conns       (-c)  (re-)load connection configuration       (重新)加载连接配置
+        --load-creds       (-s)  (re-)load credentials                    (重新)加载凭证
+        --load-pools       (-a)  (re-)load pool configuration             (重新)加载地址池配置
+        --log              (-T)  trace logging output                     跟踪日志输出
+        --flush-certs      (-f)  flush cached certificates                清空缓存的证书
+        --reload-settings  (-r)  reload strongswan.conf(5) configuration  重新加载strongswan.conf配置文件
+        --stats            (-S)  show daemon infos and statistics         显示守护进程信息及统计数据
+        --counters         (-C)  list or reset IKE event counters         列出或重置IKE事件计数器
+        --version          (-v)  show version information                 显示版本信息
+        --help             (-h)  show usage information                   显示使用说明
+```
+
+
 
 
 
